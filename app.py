@@ -357,34 +357,22 @@ def deploy(user):
         )
         return
 
-    dep = get_deployment(user.id)
+    # -------------------------------------------------
+    # FIX: USE THE ACTUAL KAGGLE NOTEBOOK SLUG
+    #
+    # Actual notebook URL:
+    # kaggle.com/code/pknetwork/f5-tts-cloud-hub/notebook
+    #
+    # Therefore the kernel slug is:
+    # f5-tts-cloud-hub
+    #
+    # Do not use the old generated slug such as:
+    # f5-tts-usama-1
+    # -------------------------------------------------
+    slug = "f5-tts-cloud-hub"
 
-    slug = (
-        f"f5-tts-"
-        f"{re.sub(r'[^a-z0-9-]+', '-', user.username.lower()).strip('-')}"
-        f"-{user.id}"
-    )[:90]
-
-    if dep and dep.kernel_id.startswith(
-        username + "/"
-    ):
-        kernel_id = dep.kernel_id
-        slug = dep.kernel_slug
-
-    else:
-        kernel_id = f"{username}/{slug}"
-
-        found = find_kernel(
-            username,
-            token,
-            slug,
-        )
-
-        if found:
-            kernel_id, slug = (
-                found,
-                found.split("/", 1)[1],
-            )
+    # Always use the exact existing Kaggle kernel ID.
+    kernel_id = f"{username}/{slug}"
 
     with tempfile.TemporaryDirectory(
         prefix="f5tts-"
