@@ -1,6 +1,8 @@
 import base64, json, os, re, subprocess, tempfile, time
 from pathlib import Path
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 import streamlit as st
 import extra_streamlit_components as stx
@@ -189,25 +191,58 @@ def logout():
     st.rerun()
 
 
-def run_kaggle(args, user, token, timeout=90):
+def run_kaggle(args, user, token, timeout=20):
     env = os.environ.copy()
 
     env["KAGGLE_USERNAME"] = user
     env["KAGGLE_API_TOKEN"] = token
 
-    p = subprocess.run(
-        ["kaggle", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        p = subprocess.run(
+            ["kaggle", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
 
-    return p.returncode, (
-        p.stdout or ""
-    ) + (
-        p.stderr or ""
-    )
+        return p.returncode, (
+            p.stdout or ""
+        ) + (
+            p.stderr or ""
+        )
+
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(
+                "utf-8",
+                errors="replace",
+            )
+
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(
+                "utf-8",
+                errors="replace",
+            )
+
+        return (
+            124,
+            (
+                f"[KAGGLE TIMEOUT] "
+                f"{' '.join(args)}\n"
+                f"{stdout}\n"
+                f"{stderr}"
+            ).strip(),
+        )
+
+    except Exception as exc:
+        return (
+            1,
+            f"[KAGGLE COMMAND ERROR] {exc}",
+        )
 
 
 def status(kernel, user, token):
@@ -215,10 +250,13 @@ def status(kernel, user, token):
         ["kernels", "status", kernel],
         user,
         token,
-        45,
+        12,
     )
 
     low = out.lower()
+
+    if code == 124:
+        return "UNKNOWN", out
 
     if code:
         return (
@@ -255,7 +293,7 @@ def logs(kernel, user, token):
         ["kernels", "logs", kernel],
         user,
         token,
-        90,
+        15,
     )
 
     if not out:
@@ -549,22 +587,62 @@ def refresh(user):
     kaggle_token = c["kaggle_token"]
 
     # -------------------------------------------------
-    # CURRENT KAGGLE STATUS
+    # FETCH STATUS AND LOGS IN PARALLEL
     # -------------------------------------------------
-    s, stext = status(
-        dep.kernel_id,
-        kaggle_user,
-        kaggle_token,
-    )
+    #
+    # Only the monitoring path is changed here.
+    # Status and logs no longer wait for each other.
+    #
+    # -------------------------------------------------
 
-    # -------------------------------------------------
-    # CURRENT LIVE KAGGLE LOGS
-    # -------------------------------------------------
-    lg = logs(
-        dep.kernel_id,
-        kaggle_user,
-        kaggle_token,
-    )
+    s = "UNKNOWN"
+    stext = ""
+    lg = ""
+
+    try:
+        with ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+
+            status_future = executor.submit(
+                status,
+                dep.kernel_id,
+                kaggle_user,
+                kaggle_token,
+            )
+
+            logs_future = executor.submit(
+                logs,
+                dep.kernel_id,
+                kaggle_user,
+                kaggle_token,
+            )
+
+            try:
+                s, stext = status_future.result(
+                    timeout=18
+                )
+            except Exception as exc:
+                s = "UNKNOWN"
+                stext = (
+                    f"[STATUS FETCH ERROR] {exc}"
+                )
+
+            try:
+                lg = logs_future.result(
+                    timeout=20
+                )
+            except Exception as exc:
+                lg = (
+                    f"[LOG FETCH ERROR] {exc}"
+                )
+
+    except Exception as exc:
+        s = "UNKNOWN"
+        stext = (
+            f"[MONITOR ERROR] {exc}"
+        )
+        lg = ""
 
     combined = (
         lg + "\n" + stext
@@ -630,7 +708,7 @@ def refresh(user):
         try:
             response = requests.get(
                 url,
-                timeout=12,
+                timeout=5,
                 allow_redirects=True,
             )
 
@@ -2028,11 +2106,6 @@ def main():
                 "_auth_cookie_bootstrap_done"
             ] = True
 
-            # One extra browser round-trip allows
-            # CookieManager to become ready after refresh.
-            #
-            # This happens only once per fresh Streamlit
-            # session, so it cannot create an infinite loop.
             if (
                 not admin_cookie
                 and not client_cookie
