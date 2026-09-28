@@ -453,7 +453,10 @@ def _get_admin_secret(name, default=""):
 ADMIN_USERNAME = _get_admin_secret("ADMIN_USERNAME")
 ADMIN_PASSWORD = _get_admin_secret("ADMIN_PASSWORD")
 ADMIN_SESSION_SECRET = _get_admin_secret("ADMIN_SESSION_SECRET")
-
+st.sidebar.write("Admin secrets check:")
+st.sidebar.write("Username:", "FOUND" if ADMIN_USERNAME else "MISSING")
+st.sidebar.write("Password:", "FOUND" if ADMIN_PASSWORD else "MISSING")
+st.sidebar.write("Session secret:", "FOUND" if ADMIN_SESSION_SECRET else "MISSING")
 WHATSAPP_NUMBER = "923097647772"
 
 WHATSAPP_MESSAGE = (
