@@ -288,18 +288,88 @@ def status(kernel, user, token):
     return "UNKNOWN", out
 
 
+# ============================================================
+# UPDATED: LIVE KAGGLE LOG MONITOR
+# PUBLIC_URL MILTE HI STOP
+# ============================================================
+
 def logs(kernel, user, token):
-    code, out = run_kaggle(
-        ["kernels", "logs", kernel],
-        user,
-        token,
-        15,
-    )
+    env = os.environ.copy()
 
-    if not out:
-        return ""
+    env["KAGGLE_USERNAME"] = user
+    env["KAGGLE_API_TOKEN"] = token
 
-    return out[-30000:]
+    try:
+        p = subprocess.Popen(
+            [
+                "kaggle",
+                "kernels",
+                "logs",
+                kernel,
+                "--follow",
+                "--interval",
+                "1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+    except Exception as exc:
+        return f"[LOG FETCH ERROR] {exc}"
+
+    collected = []
+    started = time.time()
+
+    try:
+        while time.time() - started < 20:
+
+            if p.stdout is None:
+                break
+
+            line = p.stdout.readline()
+
+            if line:
+                collected.append(line)
+
+                current = "".join(collected)
+
+                # PUBLIC_URL milte hi foran stop
+                if re.search(
+                    r"PUBLIC_URL\s*:\s*https?://[^\s]+",
+                    current,
+                    flags=re.IGNORECASE,
+                ):
+                    break
+
+            else:
+                if p.poll() is not None:
+                    break
+
+                time.sleep(0.1)
+
+    except Exception as exc:
+        collected.append(
+            f"\n[LOG FETCH ERROR] {exc}\n"
+        )
+
+    finally:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+        try:
+            p.wait(timeout=2)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+    return "".join(collected)[-30000:]
 
 
 def find_kernel(user, token, slug):
@@ -586,71 +656,42 @@ def refresh(user):
     kaggle_user = c["kaggle_username"]
     kaggle_token = c["kaggle_token"]
 
-    # -------------------------------------------------
-    # FETCH STATUS AND LOGS IN PARALLEL
-    # -------------------------------------------------
-    #
-    # Only the monitoring path is changed here.
-    # Status and logs no longer wait for each other.
-    #
-    # -------------------------------------------------
-
-    s = "UNKNOWN"
-    stext = ""
-    lg = ""
+    # =====================================================
+    # KAGGLE STATUS
+    # =====================================================
 
     try:
-        with ThreadPoolExecutor(
-            max_workers=2
-        ) as executor:
-
-            status_future = executor.submit(
-                status,
-                dep.kernel_id,
-                kaggle_user,
-                kaggle_token,
-            )
-
-            logs_future = executor.submit(
-                logs,
-                dep.kernel_id,
-                kaggle_user,
-                kaggle_token,
-            )
-
-            try:
-                s, stext = status_future.result(
-                    timeout=18
-                )
-            except Exception as exc:
-                s = "UNKNOWN"
-                stext = (
-                    f"[STATUS FETCH ERROR] {exc}"
-                )
-
-            try:
-                lg = logs_future.result(
-                    timeout=20
-                )
-            except Exception as exc:
-                lg = (
-                    f"[LOG FETCH ERROR] {exc}"
-                )
-
+        s, stext = status(
+            dep.kernel_id,
+            kaggle_user,
+            kaggle_token,
+        )
     except Exception as exc:
         s = "UNKNOWN"
-        stext = (
-            f"[MONITOR ERROR] {exc}"
+        stext = f"[STATUS FETCH ERROR] {exc}"
+
+    # =====================================================
+    # LIVE KAGGLE LOGS
+    # PUBLIC_URL MILTE HI LOG STREAM STOP
+    # =====================================================
+
+    try:
+        lg = logs(
+            dep.kernel_id,
+            kaggle_user,
+            kaggle_token,
         )
-        lg = ""
+    except Exception as exc:
+        lg = f"[LOG FETCH ERROR] {exc}"
 
     combined = (
         lg + "\n" + stext
     ).strip()
 
-    # -------------------------------------------------
+    # =====================================================
     # FIND PUBLIC URL
-    # -------------------------------------------------
+    # =====================================================
+
     url = dep.public_url
 
     matches = re.findall(
@@ -664,9 +705,10 @@ def refresh(user):
             ").,;\"'"
         )
 
-    # -------------------------------------------------
+    # =====================================================
     # FALLBACK: FIND NGROK URL
-    # -------------------------------------------------
+    # =====================================================
+
     if not url:
         ngrok_matches = re.findall(
             r"https?://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
@@ -679,77 +721,16 @@ def refresh(user):
                 ").,;\"'"
             )
 
-    logs_lower = combined.lower()
-
-    # -------------------------------------------------
-    # LIVE LOG MARKERS
-    # -------------------------------------------------
-    f5_online = (
-        "f5-tts node online"
-        in logs_lower
-    )
-
-    gradio_ready = (
-        "gradio socket ready"
-        in logs_lower
-    )
-
-    ngrok_connected = (
-        "[ngrok] public url:"
-        in logs_lower
-    )
-
-    # -------------------------------------------------
-    # ACTUAL PUBLIC DOMAIN HEALTH CHECK
-    # -------------------------------------------------
-    domain_healthy = False
+    # =====================================================
+    # PUBLIC_URL = READY
+    #
+    # NO requests.get()
+    # NO GRADIO HEALTH CHECK
+    # NO NGROK HEALTH CHECK
+    # =====================================================
 
     if url:
-        try:
-            response = requests.get(
-                url,
-                timeout=5,
-                allow_redirects=True,
-            )
-
-            response_text = (
-                response.text or ""
-            ).lower()
-
-            if response.status_code == 200:
-                if any(
-                    marker in response_text
-                    for marker in (
-                        "gradio",
-                        "f5-tts",
-                        "f5tts",
-                        "gradio-app",
-                    )
-                ):
-                    domain_healthy = True
-
-        except Exception:
-            domain_healthy = False
-
-    # -------------------------------------------------
-    # DETERMINE FINAL STATUS
-    # -------------------------------------------------
-
-    if domain_healthy:
         final = "READY"
-
-    elif (
-        f5_online
-        and url
-    ):
-        final = "RUNNING"
-
-    elif (
-        gradio_ready
-        and ngrok_connected
-        and url
-    ):
-        final = "RUNNING"
 
     elif s == "ERROR":
         final = "ERROR"
@@ -765,6 +746,10 @@ def refresh(user):
 
     else:
         final = s
+
+    # =====================================================
+    # SAVE DEPLOYMENT STATE
+    # =====================================================
 
     upsert_deployment(
         user.id,
@@ -2050,12 +2035,6 @@ def main():
 
     # ========================================================
     # AUTH COOKIE BOOTSTRAP
-    # ========================================================
-    #
-    # CookieManager may require one browser round-trip after
-    # a complete page refresh. This prevents the application
-    # from immediately interpreting the user as logged out.
-    #
     # ========================================================
 
     if not st.session_state.get(
