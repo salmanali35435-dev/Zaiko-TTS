@@ -1,7 +1,7 @@
 import os, base64, hashlib, hmac, secrets
 from datetime import datetime, timedelta, timezone
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 def utcnow():
@@ -16,6 +16,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     credentials = relationship("Credential", back_populates="user", cascade="all, delete-orphan")
     deployments = relationship("Deployment", back_populates="user", cascade="all, delete-orphan")
@@ -83,7 +85,17 @@ def _fernet():
 ENGINE = create_engine(_db_url(), pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=ENGINE, expire_on_commit=False)
 
-def init_db(): Base.metadata.create_all(ENGINE)
+def init_db():
+    Base.metadata.create_all(ENGINE)
+    # Lightweight migration for databases created by the previous version.
+    inspector = inspect(ENGINE)
+    columns = {c["name"] for c in inspector.get_columns("users")}
+    with ENGINE.begin() as conn:
+        if "access_expires_at" not in columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN access_expires_at TIMESTAMP WITH TIME ZONE"))
+        if "revoked_at" not in columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN revoked_at TIMESTAMP WITH TIME ZONE"))
+
 
 def _hash_password(password):
     salt = secrets.token_bytes(16); rounds = 390000
@@ -104,13 +116,16 @@ def create_user(username, password):
     if len(password) < 8: return None, "Password must be at least 8 characters."
     with SessionLocal() as db:
         if db.query(User).filter_by(username=username).first(): return None, "Username already exists."
-        user = User(username=username, password_hash=_hash_password(password)); db.add(user); db.commit(); db.refresh(user)
+        user = User(username=username, password_hash=_hash_password(password), access_expires_at=utcnow()+timedelta(days=30)); db.add(user); db.commit(); db.refresh(user)
         return user, None
 
 def authenticate_user(username, password):
     with SessionLocal() as db:
         user = db.query(User).filter_by(username=username.strip().lower(), is_active=True).first()
-        return user if user and _verify_password(password, user.password_hash) else None
+        if not user or not _verify_password(password, user.password_hash): return None
+        if not user.is_active: return None
+        if user.access_expires_at and user.access_expires_at <= utcnow(): return None
+        return user
 
 def create_session(user_id, days=30):
     raw = secrets.token_urlsafe(48); token_hash = hashlib.sha256(raw.encode()).hexdigest()
@@ -184,3 +199,116 @@ def delete_voice(user_id, voice_id):
         row=db.query(SavedVoice).filter_by(id=voice_id,user_id=user_id).first()
         if row: db.delete(row); db.commit(); return True
         return False
+
+
+def admin_list_users(include_revoked=False):
+    with SessionLocal() as db:
+        q = db.query(User).order_by(User.created_at.desc())
+        if not include_revoked:
+            now = utcnow()
+            q = q.filter(User.is_active == True).filter(
+                (User.access_expires_at.is_(None)) | (User.access_expires_at > now)
+            )
+        return q.all()
+
+
+def admin_get_user(user_id):
+    with SessionLocal() as db:
+        return db.query(User).filter_by(id=user_id).first()
+
+
+def admin_update_user(user_id, username=None, password=None, access_days=None):
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user:
+            return False, "Client not found."
+        if username:
+            username = username.strip().lower()
+            duplicate = db.query(User).filter(User.username == username, User.id != user_id).first()
+            if duplicate:
+                return False, "Username already exists."
+            user.username = username
+        if password:
+            if len(password) < 8:
+                return False, "Password must be at least 8 characters."
+            user.password_hash = _hash_password(password)
+        if access_days is not None:
+            user.access_expires_at = utcnow() + timedelta(days=max(0, int(access_days)))
+            user.is_active = True
+            user.revoked_at = None
+        db.commit()
+        return True, None
+
+
+def admin_create_client(username, password, access_days):
+    username = username.strip().lower()
+    if len(username) < 3 or len(username) > 80:
+        return False, "Username must be 3-80 characters."
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+    if int(access_days) < 1:
+        return False, "Access must be at least 1 day."
+    with SessionLocal() as db:
+        if db.query(User).filter_by(username=username).first():
+            return False, "Username already exists."
+        user = User(
+            username=username,
+            password_hash=_hash_password(password),
+            is_active=True,
+            access_expires_at=utcnow() + timedelta(days=int(access_days)),
+        )
+        db.add(user)
+        db.commit()
+        return True, None
+
+
+def admin_revoke_user(user_id):
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user:
+            return False
+        user.is_active = False
+        user.revoked_at = utcnow()
+        db.query(LoginSession).filter_by(user_id=user_id).delete()
+        db.query(Credential).filter_by(user_id=user_id).delete()
+        db.query(Deployment).filter_by(user_id=user_id).delete()
+        db.query(SavedVoice).filter_by(user_id=user_id).delete()
+        db.commit()
+        return True
+
+
+def admin_grant_access(user_id, access_days, password=None, username=None):
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user:
+            return False, "Client not found."
+        if username:
+            username = username.strip().lower()
+            duplicate = db.query(User).filter(User.username == username, User.id != user_id).first()
+            if duplicate:
+                return False, "Username already exists."
+            user.username = username
+        if password:
+            if len(password) < 8:
+                return False, "Password must be at least 8 characters."
+            user.password_hash = _hash_password(password)
+        user.is_active = True
+        user.revoked_at = None
+        user.access_expires_at = utcnow() + timedelta(days=max(1, int(access_days)))
+        db.commit()
+        return True, None
+
+
+def admin_stats():
+    now = utcnow()
+    with SessionLocal() as db:
+        users = db.query(User).all()
+        active = [u for u in users if u.is_active and (u.access_expires_at is None or u.access_expires_at > now)]
+        revoked = [u for u in users if not u.is_active]
+        expired = [u for u in users if u.is_active and u.access_expires_at and u.access_expires_at <= now]
+        return {
+            "total": len(users),
+            "active": len(active),
+            "revoked": len(revoked),
+            "expired": len(expired),
+        }
