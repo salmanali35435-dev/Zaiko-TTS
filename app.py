@@ -1,13 +1,6 @@
-import base64
-import json
-import os
-import re
-import subprocess
-import tempfile
-import time
+import base64, json, os, re, subprocess, tempfile, time
 from pathlib import Path
 from urllib.parse import urlparse
-
 import requests
 import streamlit as st
 import extra_streamlit_components as stx
@@ -35,12 +28,10 @@ from database import (
     admin_stats,
 )
 
-
 APP_NAME = "ZAIKO AI STUDIO"
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
-
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -57,10 +48,7 @@ def boot():
 
 boot()
 
-
-cookies = stx.CookieManager(
-    key="f5tts-cookie"
-)
+cookies = stx.CookieManager(key="f5tts-cookie")
 
 
 def normalize_domain(v):
@@ -69,24 +57,19 @@ def normalize_domain(v):
     if not v:
         return ""
 
-    if not v.startswith(
-        ("http://", "https://")
-    ):
+    if not v.startswith(("http://", "https://")):
         v = "https://" + v
 
     p = urlparse(v)
 
     return (
-        p.netloc
-        or p.path.split("/")[0]
+        p.netloc or p.path.split("/")[0]
     ).lower().rstrip("/")
 
 
 def cookie_get():
     try:
-        return cookies.get(
-            "f5tts_session"
-        )
+        return cookies.get("f5tts_session")
     except Exception:
         return None
 
@@ -96,36 +79,24 @@ def cookie_set(v):
         cookies.set(
             "f5tts_session",
             v,
-            expires_at=(
-                time.time()
-                + SESSION_DAYS * 86400
-            ),
+            expires_at=time.time() + SESSION_DAYS * 86400,
         )
     except Exception:
         pass
 
 
 def logout():
-    delete_session(
-        cookie_get()
-    )
+    delete_session(cookie_get())
 
     try:
-        cookies.delete(
-            "f5tts_session"
-        )
+        cookies.delete("f5tts_session")
     except Exception:
         pass
 
     st.rerun()
 
 
-def run_kaggle(
-    args,
-    user,
-    token,
-    timeout=90,
-):
+def run_kaggle(args, user, token, timeout=90):
     env = os.environ.copy()
 
     env["KAGGLE_USERNAME"] = user
@@ -139,18 +110,14 @@ def run_kaggle(
         env=env,
     )
 
-    return (
-        p.returncode,
-        (p.stdout or "")
-        + (p.stderr or ""),
+    return p.returncode, (
+        p.stdout or ""
+    ) + (
+        p.stderr or ""
     )
 
 
-def status(
-    kernel,
-    user,
-    token,
-):
+def status(kernel, user, token):
     code, out = run_kaggle(
         ["kernels", "status", kernel],
         user,
@@ -172,39 +139,25 @@ def status(
                     "could not find",
                 )
             )
-            else "ERROR",
-            out,
-        )
+            else "ERROR"
+        ), out
 
     if "running" in low:
         return "RUNNING", out
 
-    if (
-        "queued" in low
-        or "pending" in low
-    ):
+    if "queued" in low or "pending" in low:
         return "QUEUED", out
 
-    if (
-        "complete" in low
-        or "success" in low
-    ):
+    if "complete" in low or "success" in low:
         return "COMPLETE", out
 
-    if (
-        "error" in low
-        or "failed" in low
-    ):
+    if "error" in low or "failed" in low:
         return "ERROR", out
 
     return "UNKNOWN", out
 
 
-def logs(
-    kernel,
-    user,
-    token,
-):
+def logs(kernel, user, token):
     _, out = run_kaggle(
         ["kernels", "logs", kernel],
         user,
@@ -215,11 +168,7 @@ def logs(
     return out[-30000:]
 
 
-def find_kernel(
-    user,
-    token,
-    slug,
-):
+def find_kernel(user, token, slug):
     code, out = run_kaggle(
         [
             "kernels",
@@ -238,90 +187,83 @@ def find_kernel(
 
     for line in out.splitlines():
         if slug.lower() in line.lower():
-            match = re.search(
+            m = re.search(
                 rf"{re.escape(user)}/([A-Za-z0-9_-]+)",
                 line,
             )
 
-            if match:
-                return (
-                    f"{user}/{match.group(1)}"
-                )
+            if m:
+                return f"{user}/{m.group(1)}"
 
     return None
 
 
-def build_kernel(
-    folder,
-    token,
-    domain,
-    voices,
-):
+def build_kernel(folder, token, domain, voices):
     bundle = []
 
     for row in voices:
-        voice = get_voice(
+        v = get_voice(
             st.session_state.user_id,
             row.id,
         )
 
-        if voice:
+        if v:
             bundle.append(
                 {
-                    "name": voice["name"],
-                    "filename": voice["filename"],
+                    "name": v["name"],
+                    "filename": v["filename"],
                     "data": base64.b64encode(
-                        voice["audio_bytes"]
+                        v["audio_bytes"]
                     ).decode(),
                 }
             )
 
     code_lines = [
-        "import base64, socket, subprocess, threading, time",
-        "from pathlib import Path",
-        "import requests",
-        "from pyngrok import ngrok",
-        "PORT=7860",
-        "NGROK_AUTH_TOKEN=__TOKEN__",
-        "NGROK_DOMAIN=__DOMAIN__",
-        "VOICE_BUNDLE=__VOICES__",
+        'import base64, socket, subprocess, threading, time',
+        'from pathlib import Path',
+        'import requests',
+        'from pyngrok import ngrok',
+        'PORT=7860',
+        'NGROK_AUTH_TOKEN=__TOKEN__',
+        'NGROK_DOMAIN=__DOMAIN__',
+        'VOICE_BUNDLE=__VOICES__',
         'voice_dir=Path("saved_voices"); voice_dir.mkdir(exist_ok=True)',
-        "for item in VOICE_BUNDLE:",
+        'for item in VOICE_BUNDLE:',
         '    try: (voice_dir/item["filename"]).write_bytes(base64.b64decode(item["data"])); print("[VOICE] Restored:",item["name"])',
         '    except Exception as e: print("[VOICE] Restore failed:",e)',
         'print("[BOOT] Kaggle kernel started"); subprocess.run(["nvidia-smi"],check=False)',
         'print("[BOOT] Installing F5-TTS and ngrok"); subprocess.run(["pip","install","-q","f5-tts","pyngrok"],check=True)',
         'log=Path("f5tts.log"); handle=open(log,"a",buffering=1)',
         'proc=subprocess.Popen(["f5-tts_infer-gradio","--host","0.0.0.0","--port",str(PORT)],stdout=handle,stderr=subprocess.STDOUT,text=True)',
-        "def relay():",
-        "    pos=0",
-        "    while proc.poll() is None:",
-        "        try:",
+        'def relay():',
+        '    pos=0',
+        '    while proc.poll() is None:',
+        '        try:',
         '            if log.exists():',
         '                with open(log,"r",encoding="utf-8",errors="replace") as f: f.seek(pos); chunk=f.read(); pos=f.tell()',
         '                for line in chunk.splitlines(): print("[F5]",line)',
-        "        except Exception: pass",
-        "        time.sleep(2)",
-        "threading.Thread(target=relay,daemon=True).start()",
-        "deadline=time.time()+900",
+        '        except Exception: pass',
+        '        time.sleep(2)',
+        'threading.Thread(target=relay,daemon=True).start()',
+        'deadline=time.time()+900',
         'while time.time()<deadline:',
         '    if proc.poll() is not None: raise RuntimeError("F5-TTS exited with code %s"%proc.returncode)',
         '    try:',
         '        with socket.create_connection(("127.0.0.1",PORT),timeout=2): print("[F5] Gradio socket ready"); break',
-        "    except OSError: time.sleep(3)",
+        '    except OSError: time.sleep(3)',
         'else: raise TimeoutError("F5-TTS did not start within 15 minutes")',
         'print("[NGROK] Connecting static domain"); ngrok.set_auth_token(NGROK_AUTH_TOKEN)',
         'tunnel=ngrok.connect(addr=PORT,proto="http",domain=NGROK_DOMAIN); public_url=tunnel.public_url',
         'print("[NGROK] Public URL:",public_url)',
-        "deadline=time.time()+180",
-        "while time.time()<deadline:",
-        "    try:",
+        'deadline=time.time()+180',
+        'while time.time()<deadline:',
+        '    try:',
         '        r=requests.get(public_url,timeout=10)',
         '        if r.status_code==200 and "gradio" in r.text.lower(): print("F5-TTS NODE ONLINE"); print("PUBLIC_URL:",public_url); break',
-        '   except Exception as e: print("[HEALTH] Waiting:",e)',
-        "    time.sleep(5)",
+        '    except Exception as e: print("[HEALTH] Waiting:",e)',
+        '    time.sleep(5)',
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
-        "while proc.poll() is None: time.sleep(10)",
+        'while proc.poll() is None: time.sleep(10)',
         'print("[F5] Process exited:",proc.returncode)',
     ]
 
@@ -342,9 +284,7 @@ def build_kernel(
         repr(bundle),
     )
 
-    (
-        folder / "main.py"
-    ).write_text(
+    (folder / "main.py").write_text(
         code,
         encoding="utf-8",
     )
@@ -361,9 +301,7 @@ def build_kernel(
         "machine_shape": "NvidiaTeslaT4",
     }
 
-    (
-        folder / "kernel-metadata.json"
-    ).write_text(
+    (folder / "kernel-metadata.json").write_text(
         json.dumps(
             metadata,
             indent=2,
@@ -373,30 +311,17 @@ def build_kernel(
 
 
 def deploy(user):
-    credentials = get_credentials(
-        user.id
-    )
+    c = get_credentials(user.id)
 
-    if not credentials:
-        st.error(
-            "Save Settings first."
-        )
+    if not c:
+        st.error("Save Settings first.")
         return
 
-    username = credentials[
-        "kaggle_username"
-    ]
-
-    token = credentials[
-        "kaggle_token"
-    ]
-
-    ngrok_token = credentials[
-        "ngrok_token"
-    ]
-
+    username = c["kaggle_username"]
+    token = c["kaggle_token"]
+    ngrok_token = c["ngrok_token"]
     domain = normalize_domain(
-        credentials["ngrok_domain"]
+        c["ngrok_domain"]
     )
 
     if not all(
@@ -412,9 +337,7 @@ def deploy(user):
         )
         return
 
-    deployment = get_deployment(
-        user.id
-    )
+    dep = get_deployment(user.id)
 
     slug = (
         f"f5-tts-"
@@ -422,18 +345,14 @@ def deploy(user):
         f"-{user.id}"
     )[:90]
 
-    if (
-        deployment
-        and deployment.kernel_id.startswith(
-            username + "/"
-        )
+    if dep and dep.kernel_id.startswith(
+        username + "/"
     ):
-        kernel_id = deployment.kernel_id
-        slug = deployment.kernel_slug
+        kernel_id = dep.kernel_id
+        slug = dep.kernel_slug
+
     else:
-        kernel_id = (
-            f"{username}/{slug}"
-        )
+        kernel_id = f"{username}/{slug}"
 
         found = find_kernel(
             username,
@@ -442,11 +361,10 @@ def deploy(user):
         )
 
         if found:
-            kernel_id = found
-            slug = found.split(
-                "/",
-                1,
-            )[1]
+            kernel_id, slug = (
+                found,
+                found.split("/", 1)[1],
+            )
 
     with tempfile.TemporaryDirectory(
         prefix="f5tts-"
@@ -460,20 +378,21 @@ def deploy(user):
             list_voices(user.id),
         )
 
-        metadata_path = (
+        meta = json.loads(
+            (
+                folder
+                / "kernel-metadata.json"
+            ).read_text()
+        )
+
+        meta["id"] = kernel_id
+
+        (
             folder
             / "kernel-metadata.json"
-        )
-
-        metadata = json.loads(
-            metadata_path.read_text()
-        )
-
-        metadata["id"] = kernel_id
-
-        metadata_path.write_text(
+        ).write_text(
             json.dumps(
-                metadata,
+                meta,
                 indent=2,
             )
         )
@@ -490,7 +409,7 @@ def deploy(user):
             ),
         )
 
-        code, output = run_kaggle(
+        code, out = run_kaggle(
             [
                 "kernels",
                 "push",
@@ -510,8 +429,8 @@ def deploy(user):
             kernel_id=kernel_id,
             kernel_slug=slug,
             status="ERROR",
-            last_error=output[-12000:],
-            last_logs=output[-30000:],
+            last_error=out[-12000:],
+            last_logs=out[-30000:],
         )
 
         st.error(
@@ -519,7 +438,7 @@ def deploy(user):
         )
 
         st.code(
-            output[-12000:]
+            out[-12000:]
         )
 
         return
@@ -531,58 +450,48 @@ def deploy(user):
         status="QUEUED",
         public_url=None,
         last_error=None,
-        last_logs=output[-30000:],
+        last_logs=out[-30000:],
     )
 
     st.rerun()
 
 
 def refresh(user):
-    deployment = get_deployment(
-        user.id
+    dep = get_deployment(user.id)
+    c = get_credentials(user.id)
+
+    if not dep or not c:
+        return dep
+
+    s, stext = status(
+        dep.kernel_id,
+        c["kaggle_username"],
+        c["kaggle_token"],
     )
 
-    credentials = get_credentials(
-        user.id
-    )
-
-    if (
-        not deployment
-        or not credentials
-    ):
-        return deployment
-
-    current_status, status_text = status(
-        deployment.kernel_id,
-        credentials["kaggle_username"],
-        credentials["kaggle_token"],
-    )
-
-    log_text = logs(
-        deployment.kernel_id,
-        credentials["kaggle_username"],
-        credentials["kaggle_token"],
+    lg = logs(
+        dep.kernel_id,
+        c["kaggle_username"],
+        c["kaggle_token"],
     )
 
     combined = (
-        log_text
-        + "\n"
-        + status_text
+        lg + "\n" + stext
     ).strip()
 
-    url = deployment.public_url
+    url = dep.public_url
 
-    match = re.search(
+    m = re.search(
         r"PUBLIC_URL:\s*(https?://\S+)",
         combined,
     )
 
-    if match:
-        url = match.group(1).rstrip(
+    if m:
+        url = m.group(1).rstrip(
             ")., "
         )
 
-    final_status = current_status
+    final = s
 
     if (
         "F5-TTS NODE ONLINE"
@@ -600,30 +509,28 @@ def refresh(user):
                 and "gradio"
                 in response.text.lower()
             ):
-                final_status = "READY"
+                final = "READY"
             else:
-                final_status = "RUNNING"
+                final = "RUNNING"
 
         except Exception:
-            final_status = "RUNNING"
+            final = "RUNNING"
 
     upsert_deployment(
         user.id,
-        kernel_id=deployment.kernel_id,
-        kernel_slug=deployment.kernel_slug,
-        status=final_status,
+        kernel_id=dep.kernel_id,
+        kernel_slug=dep.kernel_slug,
+        status=final,
         public_url=url,
         last_error=(
-            status_text
-            if final_status == "ERROR"
+            stext
+            if final == "ERROR"
             else None
         ),
         last_logs=combined[-30000:],
     )
 
-    return get_deployment(
-        user.id
-    )
+    return get_deployment(user.id)
 
 
 # ============================================================
@@ -701,12 +608,14 @@ def _admin_cookie_value():
 
 def is_admin():
     try:
+        # First check the current Streamlit session.
         if st.session_state.get(
             "admin_authenticated",
             False,
         ):
             return True
 
+        # Then check the persistent browser cookie.
         cookie_value = cookies.get(
             "f5tts_admin"
         )
@@ -732,10 +641,12 @@ def is_admin():
 
 
 def admin_login():
+    # Mark admin as authenticated immediately.
     st.session_state[
         "admin_authenticated"
     ] = True
 
+    # Also save persistent cookie.
     try:
         cookie_value = (
             _admin_cookie_value()
@@ -756,10 +667,12 @@ def admin_login():
 
 
 def admin_logout():
+    # Clear current Streamlit session.
     st.session_state[
         "admin_authenticated"
     ] = False
 
+    # Clear persistent admin cookie.
     try:
         cookies.delete(
             "f5tts_admin"
@@ -883,18 +796,18 @@ def client_access_seconds(user):
 
 
 def format_countdown(seconds):
-    days, remainder = divmod(
+    days, rem = divmod(
         max(0, seconds),
         86400,
     )
 
-    hours, remainder = divmod(
-        remainder,
+    hours, rem = divmod(
+        rem,
         3600,
     )
 
     minutes, secs = divmod(
-        remainder,
+        rem,
         60,
     )
 
@@ -906,10 +819,6 @@ def format_countdown(seconds):
     )
 
 
-# ============================================================
-# CLIENT LOGIN
-# ============================================================
-
 def client_login_page():
     brand_header()
 
@@ -917,20 +826,15 @@ def client_login_page():
         "### Sign in to your account"
     )
 
-    with st.form(
-        "client_login_form",
-        clear_on_submit=False,
-    ):
+    with st.form("login"):
         username = st.text_input(
             "Username",
-            key="client_login_username",
             autocomplete="username",
         )
 
         password = st.text_input(
             "Password",
             type="password",
-            key="client_login_password",
             autocomplete="current-password",
         )
 
@@ -941,18 +845,774 @@ def client_login_page():
         )
 
     if submitted:
-        username_clean = username.strip()
-
-        # ----------------------------------------------------
-        # ADMIN LOGIN
-        # ----------------------------------------------------
         if (
             ADMIN_USERNAME
             and ADMIN_PASSWORD
-            and username_clean
+            and username.strip()
             == ADMIN_USERNAME
             and password
             == ADMIN_PASSWORD
         ):
             admin_login()
-            st.r
+            st.rerun()
+
+        user = authenticate_user(
+            username,
+            password,
+        )
+
+        if not user:
+            st.error(
+                "Login not authorized. "
+                "Please contact the administrator."
+            )
+
+        else:
+            cookie_set(
+                create_session(
+                    user.id,
+                    SESSION_DAYS,
+                )
+            )
+
+            st.rerun()
+
+    footer()
+
+
+def admin_dashboard():
+    stats = admin_stats()
+
+    st.title(
+        "Admin Dashboard"
+    )
+
+    st.caption(
+        "ZAIKO AI STUDIO client management"
+    )
+
+    a, b, c, d = st.columns(4)
+
+    a.metric(
+        "Active Clients",
+        stats["active"],
+    )
+
+    b.metric(
+        "Revoked Clients",
+        stats["revoked"],
+    )
+
+    c.metric(
+        "Expired Access",
+        stats["expired"],
+    )
+
+    d.metric(
+        "Total Clients",
+        stats["total"],
+    )
+
+    st.divider()
+
+    st.subheader(
+        "Client Overview"
+    )
+
+    users = admin_list_users(
+        include_revoked=True
+    )
+
+    if not users:
+        st.info(
+            "No clients have been created yet."
+        )
+
+    for user in users[:12]:
+        status_text = (
+            "Active"
+            if user.is_active
+            else "Revoked"
+        )
+
+        expiry = (
+            user.access_expires_at.strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+            if user.access_expires_at
+            else "No expiry"
+        )
+
+        st.markdown(
+            f'<div class="client-card">'
+            f"<b>{user.username}</b> — "
+            f"{status_text}<br>"
+            f"Access expiry: {expiry}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def active_clients():
+    st.title(
+        "Active Clients"
+    )
+
+    users = admin_list_users(
+        include_revoked=False
+    )
+
+    if not users:
+        st.info(
+            "No active clients."
+        )
+        return
+
+    for user in users:
+        with st.container(
+            border=True
+        ):
+            left, right = st.columns(
+                [4, 1]
+            )
+
+            with left:
+                st.markdown(
+                    f"### {user.username}"
+                )
+
+                expiry = (
+                    user.access_expires_at.strftime(
+                        "%d %b %Y, %H:%M UTC"
+                    )
+                    if user.access_expires_at
+                    else "No expiry"
+                )
+
+                st.caption(
+                    f"Current expiry: {expiry}"
+                )
+
+            with right:
+                if st.button(
+                    "Revoke",
+                    key=f"revoke-{user.id}",
+                ):
+                    admin_revoke_user(
+                        user.id
+                    )
+
+                    st.success(
+                        "Account revoked."
+                    )
+
+                    st.rerun()
+
+            with st.expander(
+                "Edit client"
+            ):
+                new_username = st.text_input(
+                    "Username",
+                    value=user.username,
+                    key=f"un-{user.id}",
+                )
+
+                new_password = st.text_input(
+                    "New password (leave blank to keep current)",
+                    type="password",
+                    key=f"pw-{user.id}",
+                )
+
+                current_days = max(
+                    1,
+                    client_access_seconds(
+                        user
+                    ) // 86400,
+                )
+
+                access_days = st.number_input(
+                    "Access duration from now (days)",
+                    min_value=1,
+                    max_value=3650,
+                    value=current_days,
+                    key=f"days-{user.id}",
+                )
+
+                if st.button(
+                    "Save Changes",
+                    key=f"save-{user.id}",
+                    type="primary",
+                ):
+                    ok, error = (
+                        admin_update_user(
+                            user.id,
+                            username=new_username,
+                            password=(
+                                new_password
+                                if new_password
+                                else None
+                            ),
+                            access_days=int(
+                                access_days
+                            ),
+                        )
+                    )
+
+                    if ok:
+                        st.success(
+                            "Changes saved and applied."
+                        )
+
+                        st.rerun()
+
+                    else:
+                        st.error(
+                            error
+                            or "Unable to save changes."
+                        )
+
+
+def revoked_clients():
+    st.title(
+        "Revoked Clients"
+    )
+
+    users = [
+        u
+        for u in admin_list_users(
+            include_revoked=True
+        )
+        if not u.is_active
+    ]
+
+    if not users:
+        st.info(
+            "No revoked clients."
+        )
+        return
+
+    for user in users:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                f"### {user.username}"
+            )
+
+            st.caption(
+                "Access revoked. Client credentials, "
+                "deployment and saved voices were cleared."
+            )
+
+            days = st.number_input(
+                "Grant access (days)",
+                min_value=1,
+                max_value=3650,
+                value=7,
+                key=f"grant-days-{user.id}",
+            )
+
+            if st.button(
+                "Grant Access",
+                key=f"grant-{user.id}",
+                type="primary",
+            ):
+                ok, error = (
+                    admin_grant_access(
+                        user.id,
+                        int(days),
+                    )
+                )
+
+                if ok:
+                    st.success(
+                        "Access granted. Client is active again."
+                    )
+
+                    st.rerun()
+
+                else:
+                    st.error(
+                        error
+                        or "Unable to grant access."
+                    )
+
+
+def create_new_client():
+    st.title(
+        "Create New Client"
+    )
+
+    with st.form(
+        "new-client"
+    ):
+        username = st.text_input(
+            "Client username"
+        )
+
+        password = st.text_input(
+            "Client password",
+            type="password",
+        )
+
+        access_days = st.number_input(
+            "Access duration (days)",
+            min_value=1,
+            max_value=3650,
+            value=7,
+        )
+
+        submitted = st.form_submit_button(
+            "Save Changes / Create Client",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        ok, error = (
+            admin_create_client(
+                username,
+                password,
+                int(access_days),
+            )
+        )
+
+        if ok:
+            st.success(
+                f"Client '{username.strip()}' "
+                "created and activated."
+            )
+
+        else:
+            st.error(
+                error
+                or "Unable to create client."
+            )
+
+
+def admin_panel():
+    brand_header()
+
+    with st.sidebar:
+        st.markdown(
+            "### ZAIKO AI STUDIO"
+        )
+
+        page = st.radio(
+            "Admin Menu",
+            [
+                "Dashboard",
+                "Active Clients",
+                "Revoked Clients",
+                "Create New Client",
+            ],
+        )
+
+        st.divider()
+
+        if st.button(
+            "Admin Logout",
+            use_container_width=True,
+        ):
+            admin_logout()
+
+    if page == "Dashboard":
+        admin_dashboard()
+
+    elif page == "Active Clients":
+        active_clients()
+
+    elif page == "Revoked Clients":
+        revoked_clients()
+
+    else:
+        create_new_client()
+
+    footer()
+
+
+def client_settings(user):
+    st.title(
+        "Settings"
+    )
+
+    creds = (
+        get_credentials(user.id)
+        or {}
+    )
+
+    with st.form(
+        "settings"
+    ):
+        ku = st.text_input(
+            "Kaggle username",
+            value=creds.get(
+                "kaggle_username",
+                "",
+            ),
+        )
+
+        kt = st.text_input(
+            "Kaggle API token",
+            value=creds.get(
+                "kaggle_token",
+                "",
+            ),
+            type="password",
+        )
+
+        nt = st.text_input(
+            "ngrok auth token",
+            value=creds.get(
+                "ngrok_token",
+                "",
+            ),
+            type="password",
+        )
+
+        nd = st.text_input(
+            "ngrok static domain",
+            value=creds.get(
+                "ngrok_domain",
+                "",
+            ),
+        )
+
+        ok = st.form_submit_button(
+            "Save settings",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if ok:
+        nd = normalize_domain(nd)
+
+        if not all(
+            (
+                ku,
+                kt,
+                nt,
+                nd,
+            )
+        ):
+            st.error(
+                "All fields are required."
+            )
+
+        else:
+            save_credentials(
+                user.id,
+                ku,
+                kt,
+                nt,
+                nd,
+            )
+
+            st.success(
+                "Settings saved securely."
+            )
+
+    st.divider()
+
+    st.subheader(
+        "Saved Voices"
+    )
+
+    upload = st.file_uploader(
+        "Reference voice",
+        type=[
+            "wav",
+            "mp3",
+            "flac",
+            "m4a",
+            "ogg",
+        ],
+    )
+
+    name = st.text_input(
+        "Voice name"
+    )
+
+    if st.button(
+        "Save Voice",
+        use_container_width=True,
+    ):
+        if (
+            not upload
+            or not name.strip()
+        ):
+            st.error(
+                "Choose an audio file and "
+                "enter a voice name."
+            )
+
+        else:
+            save_voice(
+                user.id,
+                name,
+                upload.name,
+                upload.type,
+                upload.getvalue(),
+            )
+
+            st.success(
+                "Voice saved."
+            )
+
+            st.rerun()
+
+    for row in list_voices(
+        user.id
+    ):
+        x, y = st.columns(
+            [5, 1]
+        )
+
+        x.write(
+            f"**{row.name}** — "
+            f"`{row.filename}`"
+        )
+
+        if y.button(
+            "Delete",
+            key=f"voice-{row.id}",
+        ):
+            delete_voice(
+                user.id,
+                row.id,
+            )
+
+            st.rerun()
+
+
+def client_dashboard(user):
+    st.title(
+        f"Welcome, {user.username} 👋"
+    )
+
+    st.caption(
+        "Your ZAIKO AI STUDIO dashboard"
+    )
+
+    if hasattr(
+        st,
+        "fragment",
+    ):
+
+        @st.fragment(
+            run_every="1s"
+        )
+        def countdown_fragment():
+            st.subheader(
+                "Your Plan"
+            )
+
+            seconds = (
+                client_access_seconds(
+                    user
+                )
+            )
+
+            if seconds <= 0:
+                st.error(
+                    "Your access has expired. "
+                    "Please contact the administrator."
+                )
+
+            else:
+                expiry = (
+                    user.access_expires_at.strftime(
+                        "%d %b %Y, %I:%M:%S %p UTC"
+                    )
+                )
+
+                st.write(
+                    f"Access expires: **{expiry}**"
+                )
+
+                st.markdown(
+                    f'<div class="countdown">'
+                    f"{format_countdown(seconds)}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+        countdown_fragment()
+
+    else:
+        seconds = (
+            client_access_seconds(
+                user
+            )
+        )
+
+        st.subheader(
+            "Your Plan"
+        )
+
+        st.write(
+            "Access expires: **"
+            f"{user.access_expires_at.strftime('%d %b %Y, %I:%M:%S %p UTC')}"
+            "**"
+        )
+
+        st.markdown(
+            f'<div class="countdown">'
+            f"{format_countdown(seconds)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    if st.button(
+        "🚀 Deploy / Restart F5-TTS",
+        type="primary",
+        use_container_width=True,
+    ):
+        deploy(user)
+
+    dep = refresh(user)
+
+    if not dep:
+        st.info(
+            "No F5-TTS deployment yet."
+        )
+        return
+
+    st.metric(
+        "Kaggle Session",
+        dep.status or "IDLE",
+    )
+
+    if (
+        dep.status == "READY"
+        and dep.public_url
+    ):
+        st.success(
+            "F5-TTS, Gradio and ngrok are online."
+        )
+
+        st.link_button(
+            "🎙️ Open F5-TTS",
+            dep.public_url,
+            use_container_width=True,
+        )
+
+    elif dep.status == "ERROR":
+        st.error(
+            "Kaggle kernel reported an error."
+        )
+
+        st.code(
+            (dep.last_error or "")[
+                -12000:
+            ]
+        )
+
+    else:
+        st.info(
+            "Waiting for GPU → F5-TTS → "
+            "Gradio → ngrok health checks."
+        )
+
+    st.subheader(
+        "Kaggle Logs"
+    )
+
+    st.code(
+        (
+            dep.last_logs
+            or "Waiting for logs..."
+        )[-30000:],
+        language="text",
+    )
+
+
+def client_panel(user):
+    with st.sidebar:
+        st.markdown(
+            "### ZAIKO AI STUDIO"
+        )
+
+        page = st.radio(
+            "Menu",
+            [
+                "Dashboard",
+                "Settings",
+            ],
+        )
+
+        st.divider()
+
+        if st.button(
+            "Log out",
+            use_container_width=True,
+        ):
+            logout()
+
+    if page == "Dashboard":
+        client_dashboard(user)
+
+    else:
+        client_settings(user)
+
+    footer()
+
+
+def main():
+    branding_css()
+
+    if is_admin():
+        admin_panel()
+        return
+
+    user = get_user_by_session(
+        cookie_get()
+    )
+
+    if not user:
+        client_login_page()
+        return
+
+    from datetime import datetime, timezone
+
+    if (
+        not user.is_active
+        or (
+            user.access_expires_at
+            and user.access_expires_at
+            <= datetime.now(timezone.utc)
+        )
+    ):
+        delete_session(
+            cookie_get()
+        )
+
+        try:
+            cookies.delete(
+                "f5tts_session"
+            )
+        except Exception:
+            pass
+
+        st.error(
+            "Your access has expired or has been revoked. "
+            "Please contact the administrator."
+        )
+
+        footer()
+        return
+
+    client_panel(user)
+
+
+try:
+    main()
+
+except Exception as exc:
+    st.error(
+        "Application error"
+    )
+
+    st.exception(exc)
