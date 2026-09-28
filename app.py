@@ -14,7 +14,6 @@ from database import (
     get_credentials,
     get_deployment,
     get_user_by_session,
-    get_user_by_id,
     get_voice,
     init_db,
     list_voices,
@@ -95,6 +94,12 @@ def cookie_set(v):
 def logout():
     st.session_state.pop(
         "client_authenticated_user_id",
+        None,
+    )
+
+    # Added only to clear the in-memory client session.
+    st.session_state.pop(
+        "client_authenticated_user",
         None,
     )
 
@@ -656,12 +661,10 @@ def is_admin():
 
 
 def admin_login():
-    # Mark admin as authenticated immediately.
     st.session_state[
         "admin_authenticated"
     ] = True
 
-    # Also save persistent cookie.
     try:
         cookie_value = (
             _admin_cookie_value()
@@ -682,12 +685,10 @@ def admin_login():
 
 
 def admin_logout():
-    # Clear current Streamlit session.
     st.session_state[
         "admin_authenticated"
     ] = False
 
-    # Clear persistent admin cookie.
     try:
         cookies.delete(
             "f5tts_admin"
@@ -865,9 +866,6 @@ def client_login_page():
     if submitted:
         username_clean = username.strip()
 
-        # -------------------------------------------------
-        # ADMIN LOGIN
-        # -------------------------------------------------
         if (
             ADMIN_USERNAME
             and ADMIN_PASSWORD
@@ -878,9 +876,6 @@ def client_login_page():
             st.rerun()
             return
 
-        # -------------------------------------------------
-        # CLIENT LOGIN
-        # -------------------------------------------------
         try:
             user = authenticate_user(
                 username_clean,
@@ -897,9 +892,6 @@ def client_login_page():
             footer()
             return
 
-        # -------------------------------------------------
-        # INVALID CLIENT LOGIN
-        # -------------------------------------------------
         if user is None:
             st.error(
                 "Invalid username or password, "
@@ -909,9 +901,6 @@ def client_login_page():
             footer()
             return
 
-        # -------------------------------------------------
-        # CREATE DATABASE SESSION
-        # -------------------------------------------------
         try:
             raw_session = create_session(
                 user.id,
@@ -939,23 +928,22 @@ def client_login_page():
             return
 
         # -------------------------------------------------
-        # IMPORTANT CLIENT SESSION FIX
-        #
-        # Save the authenticated user ID in the current
-        # Streamlit session immediately.
+        # CLIENT SESSION FIX
+        # Store the complete authenticated user object.
+        # This removes the need for get_user_by_id().
         # -------------------------------------------------
+        st.session_state[
+            "client_authenticated_user"
+        ] = user
+
         st.session_state[
             "client_authenticated_user_id"
         ] = user.id
 
-        # Existing user_id is also needed by build_kernel().
         st.session_state[
             "user_id"
         ] = user.id
 
-        # -------------------------------------------------
-        # Persistent browser cookie.
-        # -------------------------------------------------
         cookie_ok = cookie_set(
             raw_session
         )
@@ -972,7 +960,6 @@ def client_login_page():
             "Opening your dashboard..."
         )
 
-        # Give CookieManager time to save the browser cookie.
         time.sleep(1)
 
         st.rerun()
@@ -1630,7 +1617,6 @@ def client_dashboard(user):
 
 
 def client_panel(user):
-    # Keep the user ID available for build_kernel().
     st.session_state[
         "user_id"
     ] = user.id
@@ -1668,36 +1654,21 @@ def client_panel(user):
 def main():
     branding_css()
 
-    # -------------------------------------------------
-    # ADMIN AUTHENTICATION
-    # -------------------------------------------------
     if is_admin():
         admin_panel()
         return
 
     # -------------------------------------------------
     # CLIENT AUTHENTICATION
-    #
-    # First check the current Streamlit session.
-    # This fixes the login/rerun timing problem.
+    # First use the current Streamlit session.
+    # This does NOT require get_user_by_id().
     # -------------------------------------------------
-    client_user_id = st.session_state.get(
-        "client_authenticated_user_id"
+    user = st.session_state.get(
+        "client_authenticated_user"
     )
 
-    user = None
-
-    if client_user_id:
-        try:
-            user = get_user_by_id(
-                client_user_id
-            )
-        except Exception:
-            user = None
-
     # -------------------------------------------------
-    # If Streamlit session does not contain the user,
-    # restore from the persistent browser cookie.
+    # FALLBACK TO PERSISTENT COOKIE
     # -------------------------------------------------
     if user is None:
         raw_cookie = cookie_get()
@@ -1708,6 +1679,10 @@ def main():
             )
 
             if user:
+                st.session_state[
+                    "client_authenticated_user"
+                ] = user
+
                 st.session_state[
                     "client_authenticated_user_id"
                 ] = user.id
@@ -1732,6 +1707,11 @@ def main():
             <= datetime.now(timezone.utc)
         )
     ):
+        st.session_state.pop(
+            "client_authenticated_user",
+            None,
+        )
+
         st.session_state.pop(
             "client_authenticated_user_id",
             None,
@@ -1759,7 +1739,6 @@ def main():
         footer()
         return
 
-    # Keep user_id synchronized for the rest of the app.
     st.session_state[
         "user_id"
     ] = user.id
