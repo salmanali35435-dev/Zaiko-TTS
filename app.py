@@ -107,9 +107,9 @@ def refresh(user):
     return get_deployment(user.id)
 
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "AKKHAN").strip()
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "AKKHAN@123")
-ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET", "Nq2LTOggOUeWzYb0FMNme0QVUgZ6p8psJIPn93_828Dz30pE3afpVYvMOZi-7LhP").strip()
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET", "").strip()
 WHATSAPP_NUMBER = "923097647772"
 WHATSAPP_MESSAGE = (
     "Assalam-o-Alaikum, I would like to get assistance regarding my ZAIKO AI STUDIO account. "
