@@ -366,6 +366,24 @@ def authenticate_user(username, password):
         return user
 
 
+# ============================================================
+# ADDED ONLY FOR CLIENT LOGIN SESSION FIX
+# ============================================================
+def get_user_by_id(user_id):
+    try:
+        with SessionLocal() as db:
+            return (
+                db.query(User)
+                .filter(
+                    User.id == user_id,
+                    User.is_active == True,
+                )
+                .first()
+            )
+    except Exception:
+        return None
+
+
 def create_session(user_id, days=30):
     raw = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(
@@ -892,4 +910,4 @@ def admin_stats():
             "active": len(active),
             "revoked": len(revoked),
             "expired": len(expired),
-                }
+        }
