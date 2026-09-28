@@ -97,7 +97,6 @@ def logout():
         None,
     )
 
-    # Added only to clear the in-memory client session.
     st.session_state.pop(
         "client_authenticated_user",
         None,
@@ -242,7 +241,14 @@ def build_kernel(folder, token, domain, voices):
         'import base64, socket, subprocess, threading, time',
         'from pathlib import Path',
         'import requests',
+
+        # FIX:
+        # Install pyngrok BEFORE importing it.
+        'print("[BOOT] Installing F5-TTS and ngrok")',
+        'subprocess.run(["pip","install","-q","f5-tts","pyngrok"],check=True)',
+
         'from pyngrok import ngrok',
+
         'PORT=7860',
         'NGROK_AUTH_TOKEN=__TOKEN__',
         'NGROK_DOMAIN=__DOMAIN__',
@@ -252,7 +258,6 @@ def build_kernel(folder, token, domain, voices):
         '    try: (voice_dir/item["filename"]).write_bytes(base64.b64decode(item["data"])); print("[VOICE] Restored:",item["name"])',
         '    except Exception as e: print("[VOICE] Restore failed:",e)',
         'print("[BOOT] Kaggle kernel started"); subprocess.run(["nvidia-smi"],check=False)',
-        'print("[BOOT] Installing F5-TTS and ngrok"); subprocess.run(["pip","install","-q","f5-tts","pyngrok"],check=True)',
         'log=Path("f5tts.log"); handle=open(log,"a",buffering=1)',
         'proc=subprocess.Popen(["f5-tts_infer-gradio","--host","0.0.0.0","--port",str(PORT)],stdout=handle,stderr=subprocess.STDOUT,text=True)',
         'def relay():',
@@ -365,9 +370,6 @@ def deploy(user):
     #
     # Therefore the kernel slug is:
     # f5-tts-cloud-hub
-    #
-    # Do not use the old generated slug such as:
-    # f5-tts-usama-1
     # -------------------------------------------------
     slug = "f5-tts-cloud-hub"
 
@@ -616,14 +618,12 @@ def _admin_cookie_value():
 
 def is_admin():
     try:
-        # First check the current Streamlit session.
         if st.session_state.get(
             "admin_authenticated",
             False,
         ):
             return True
 
-        # Then check the persistent browser cookie.
         cookie_value = cookies.get(
             "f5tts_admin"
         )
@@ -915,11 +915,6 @@ def client_login_page():
             footer()
             return
 
-        # -------------------------------------------------
-        # CLIENT SESSION FIX
-        # Store the complete authenticated user object.
-        # This removes the need for get_user_by_id().
-        # -------------------------------------------------
         st.session_state[
             "client_authenticated_user"
         ] = user
