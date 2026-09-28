@@ -14,6 +14,7 @@ from database import (
     get_credentials,
     get_deployment,
     get_user_by_session,
+    get_user_by_id,
     get_voice,
     init_db,
     list_voices,
@@ -76,17 +77,31 @@ def cookie_get():
 
 def cookie_set(v):
     try:
+        if not v:
+            return False
+
         cookies.set(
             "f5tts_session",
             v,
             expires_at=time.time() + SESSION_DAYS * 86400,
         )
+
+        return True
+
     except Exception:
-        pass
+        return False
 
 
 def logout():
-    delete_session(cookie_get())
+    st.session_state.pop(
+        "client_authenticated_user_id",
+        None,
+    )
+
+    raw_cookie = cookie_get()
+
+    if raw_cookie:
+        delete_session(raw_cookie)
 
     try:
         cookies.delete("f5tts_session")
@@ -260,7 +275,7 @@ def build_kernel(folder, token, domain, voices):
         '    try:',
         '        r=requests.get(public_url,timeout=10)',
         '        if r.status_code==200 and "gradio" in r.text.lower(): print("F5-TTS NODE ONLINE"); print("PUBLIC_URL:",public_url); break',
-        '    except Exception as e: print("[HEALTH] Waiting:",e)',
+        '    except Exception as e: print("[HEALTH] Waiting:", e)',
         '    time.sleep(5)',
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
         'while proc.poll() is None: time.sleep(10)',
@@ -826,7 +841,10 @@ def client_login_page():
         "### Sign in to your account"
     )
 
-    with st.form("login"):
+    with st.form(
+        "login",
+        clear_on_submit=False,
+    ):
         username = st.text_input(
             "Username",
             autocomplete="username",
@@ -845,37 +863,119 @@ def client_login_page():
         )
 
     if submitted:
+        username_clean = username.strip()
+
+        # -------------------------------------------------
+        # ADMIN LOGIN
+        # -------------------------------------------------
         if (
             ADMIN_USERNAME
             and ADMIN_PASSWORD
-            and username.strip()
-            == ADMIN_USERNAME
-            and password
-            == ADMIN_PASSWORD
+            and username_clean == ADMIN_USERNAME
+            and password == ADMIN_PASSWORD
         ):
             admin_login()
             st.rerun()
+            return
 
-        user = authenticate_user(
-            username,
-            password,
+        # -------------------------------------------------
+        # CLIENT LOGIN
+        # -------------------------------------------------
+        try:
+            user = authenticate_user(
+                username_clean,
+                password,
+            )
+
+        except Exception as exc:
+            st.error(
+                "Unable to check your login."
+            )
+
+            st.exception(exc)
+
+            footer()
+            return
+
+        # -------------------------------------------------
+        # INVALID CLIENT LOGIN
+        # -------------------------------------------------
+        if user is None:
+            st.error(
+                "Invalid username or password, "
+                "or your client access is expired/revoked."
+            )
+
+            footer()
+            return
+
+        # -------------------------------------------------
+        # CREATE DATABASE SESSION
+        # -------------------------------------------------
+        try:
+            raw_session = create_session(
+                user.id,
+                SESSION_DAYS,
+            )
+
+            if not raw_session:
+                st.error(
+                    "Login succeeded, but a "
+                    "client session could not be created."
+                )
+
+                footer()
+                return
+
+        except Exception as exc:
+            st.error(
+                "Login succeeded, but the "
+                "client session could not be created."
+            )
+
+            st.exception(exc)
+
+            footer()
+            return
+
+        # -------------------------------------------------
+        # IMPORTANT CLIENT SESSION FIX
+        #
+        # Save the authenticated user ID in the current
+        # Streamlit session immediately.
+        # -------------------------------------------------
+        st.session_state[
+            "client_authenticated_user_id"
+        ] = user.id
+
+        # Existing user_id is also needed by build_kernel().
+        st.session_state[
+            "user_id"
+        ] = user.id
+
+        # -------------------------------------------------
+        # Persistent browser cookie.
+        # -------------------------------------------------
+        cookie_ok = cookie_set(
+            raw_session
         )
 
-        if not user:
-            st.error(
-                "Login not authorized. "
-                "Please contact the administrator."
+        if not cookie_ok:
+            st.warning(
+                "Login successful. "
+                "Your current session is active, but "
+                "persistent browser login could not be saved."
             )
 
-        else:
-            cookie_set(
-                create_session(
-                    user.id,
-                    SESSION_DAYS,
-                )
-            )
+        st.success(
+            "Login successful. "
+            "Opening your dashboard..."
+        )
 
-            st.rerun()
+        # Give CookieManager time to save the browser cookie.
+        time.sleep(1)
+
+        st.rerun()
 
     footer()
 
@@ -1530,6 +1630,11 @@ def client_dashboard(user):
 
 
 def client_panel(user):
+    # Keep the user ID available for build_kernel().
+    st.session_state[
+        "user_id"
+    ] = user.id
+
     with st.sidebar:
         st.markdown(
             "### ZAIKO AI STUDIO"
@@ -1563,18 +1668,60 @@ def client_panel(user):
 def main():
     branding_css()
 
+    # -------------------------------------------------
+    # ADMIN AUTHENTICATION
+    # -------------------------------------------------
     if is_admin():
         admin_panel()
         return
 
-    user = get_user_by_session(
-        cookie_get()
+    # -------------------------------------------------
+    # CLIENT AUTHENTICATION
+    #
+    # First check the current Streamlit session.
+    # This fixes the login/rerun timing problem.
+    # -------------------------------------------------
+    client_user_id = st.session_state.get(
+        "client_authenticated_user_id"
     )
 
+    user = None
+
+    if client_user_id:
+        try:
+            user = get_user_by_id(
+                client_user_id
+            )
+        except Exception:
+            user = None
+
+    # -------------------------------------------------
+    # If Streamlit session does not contain the user,
+    # restore from the persistent browser cookie.
+    # -------------------------------------------------
+    if user is None:
+        raw_cookie = cookie_get()
+
+        if raw_cookie:
+            user = get_user_by_session(
+                raw_cookie
+            )
+
+            if user:
+                st.session_state[
+                    "client_authenticated_user_id"
+                ] = user.id
+
+    # -------------------------------------------------
+    # NO CLIENT SESSION
+    # -------------------------------------------------
     if not user:
         client_login_page()
         return
 
+    # -------------------------------------------------
+    # CLIENT ACCESS VALIDATION
+    # -------------------------------------------------
     from datetime import datetime, timezone
 
     if (
@@ -1585,9 +1732,17 @@ def main():
             <= datetime.now(timezone.utc)
         )
     ):
-        delete_session(
-            cookie_get()
+        st.session_state.pop(
+            "client_authenticated_user_id",
+            None,
         )
+
+        raw_cookie = cookie_get()
+
+        if raw_cookie:
+            delete_session(
+                raw_cookie
+            )
 
         try:
             cookies.delete(
@@ -1603,6 +1758,11 @@ def main():
 
         footer()
         return
+
+    # Keep user_id synchronized for the rest of the app.
+    st.session_state[
+        "user_id"
+    ] = user.id
 
     client_panel(user)
 
