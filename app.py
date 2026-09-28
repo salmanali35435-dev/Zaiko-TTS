@@ -69,9 +69,26 @@ def normalize_domain(v):
 
 def cookie_get():
     try:
-        return cookies.get("f5tts_session")
+        value = cookies.get("f5tts_session")
+
+        if value:
+            return value
+
+        try:
+            all_cookies = cookies.get_all()
+
+            if isinstance(all_cookies, dict):
+                return all_cookies.get(
+                    "f5tts_session"
+                )
+
+        except Exception:
+            pass
+
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def cookie_set(v):
@@ -107,6 +124,24 @@ def page_cookie_get(name, default):
             "Create New Client",
         ):
             return value
+
+        try:
+            all_cookies = cookies.get_all()
+
+            if isinstance(all_cookies, dict):
+                value = all_cookies.get(name)
+
+                if value in (
+                    "Dashboard",
+                    "Settings",
+                    "Active Clients",
+                    "Revoked Clients",
+                    "Create New Client",
+                ):
+                    return value
+
+        except Exception:
+            pass
 
     except Exception:
         pass
@@ -147,6 +182,7 @@ def logout():
 
     try:
         cookies.delete("f5tts_session")
+        cookies.delete("f5tts_client_page")
     except Exception:
         pass
 
@@ -283,8 +319,6 @@ def build_kernel(folder, token, domain, voices):
         'from pathlib import Path',
         'import requests',
 
-        # FIX:
-        # Install pyngrok BEFORE importing it.
         'print("[BOOT] Installing F5-TTS and ngrok")',
         'subprocess.run(["pip","install","-q","f5-tts","pyngrok"],check=True)',
 
@@ -404,11 +438,10 @@ def deploy(user):
         return
 
     # -------------------------------------------------
-    # FIX: USE THE ACTUAL KAGGLE NOTEBOOK SLUG
+    # USE THE ACTUAL KAGGLE NOTEBOOK SLUG
     # -------------------------------------------------
     slug = "f5-tts-cloud-hub"
 
-    # Always use the exact existing Kaggle kernel ID.
     kernel_id = f"{username}/{slug}"
 
     with tempfile.TemporaryDirectory(
@@ -516,7 +549,7 @@ def refresh(user):
     kaggle_token = c["kaggle_token"]
 
     # -------------------------------------------------
-    # GET CURRENT KAGGLE STATUS
+    # CURRENT KAGGLE STATUS
     # -------------------------------------------------
     s, stext = status(
         dep.kernel_id,
@@ -525,7 +558,7 @@ def refresh(user):
     )
 
     # -------------------------------------------------
-    # GET CURRENT KAGGLE LOGS
+    # CURRENT LIVE KAGGLE LOGS
     # -------------------------------------------------
     lg = logs(
         dep.kernel_id,
@@ -538,12 +571,12 @@ def refresh(user):
     ).strip()
 
     # -------------------------------------------------
-    # FIND PUBLIC URL FROM KAGGLE LOGS
+    # FIND PUBLIC URL
     # -------------------------------------------------
     url = dep.public_url
 
     matches = re.findall(
-        r"PUBLIC_URL:\s*(https?://[^\s]+)",
+        r"PUBLIC_URL\s*:\s*(https?://[^\s]+)",
         combined,
         flags=re.IGNORECASE,
     )
@@ -554,11 +587,11 @@ def refresh(user):
         )
 
     # -------------------------------------------------
-    # FALLBACK: FIND NGROK DOMAIN DIRECTLY
+    # FALLBACK: FIND NGROK URL
     # -------------------------------------------------
     if not url:
         ngrok_matches = re.findall(
-            r"https://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
+            r"https?://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
             combined,
             flags=re.IGNORECASE,
         )
@@ -568,10 +601,11 @@ def refresh(user):
                 ").,;\"'"
             )
 
-    final = s
-
     logs_lower = combined.lower()
 
+    # -------------------------------------------------
+    # LIVE LOG MARKERS
+    # -------------------------------------------------
     f5_online = (
         "f5-tts node online"
         in logs_lower
@@ -588,7 +622,7 @@ def refresh(user):
     )
 
     # -------------------------------------------------
-    # REAL DOMAIN HEALTH CHECK
+    # ACTUAL PUBLIC DOMAIN HEALTH CHECK
     # -------------------------------------------------
     domain_healthy = False
 
@@ -604,50 +638,40 @@ def refresh(user):
                 response.text or ""
             ).lower()
 
-            if (
-                response.status_code == 200
-                and (
-                    "gradio"
-                    in response_text
-                    or "f5-tts"
-                    in response_text
-                    or "f5tts"
-                    in response_text
-                )
-            ):
-                domain_healthy = True
+            if response.status_code == 200:
+                if any(
+                    marker in response_text
+                    for marker in (
+                        "gradio",
+                        "f5-tts",
+                        "f5tts",
+                        "gradio-app",
+                    )
+                ):
+                    domain_healthy = True
 
         except Exception:
             domain_healthy = False
 
     # -------------------------------------------------
-    # READY
-    #
-    # If Kaggle logs confirm F5-TTS/Gradio/ngrok and
-    # the actual public domain responds, mark READY.
-    #
-    # Also allow the real domain health-check to confirm
-    # readiness if Kaggle live-log delivery temporarily
-    # misses one of the expected log markers.
+    # DETERMINE FINAL STATUS
     # -------------------------------------------------
-    if (
-        url
-        and domain_healthy
-        and (
-            f5_online
-            or (
-                gradio_ready
-                and ngrok_connected
-            )
-        )
-    ):
+
+    if domain_healthy:
         final = "READY"
 
     elif (
-        url
-        and domain_healthy
+        f5_online
+        and url
     ):
-        final = "READY"
+        final = "RUNNING"
+
+    elif (
+        gradio_ready
+        and ngrok_connected
+        and url
+    ):
+        final = "RUNNING"
 
     elif s == "ERROR":
         final = "ERROR"
@@ -657,6 +681,9 @@ def refresh(user):
 
     elif s == "QUEUED":
         final = "QUEUED"
+
+    elif s == "COMPLETE":
+        final = "COMPLETE"
 
     else:
         final = s
@@ -759,9 +786,29 @@ def is_admin():
         ):
             return True
 
-        cookie_value = cookies.get(
-            "f5tts_admin"
-        )
+        cookie_value = None
+
+        try:
+            cookie_value = cookies.get(
+                "f5tts_admin"
+            )
+        except Exception:
+            pass
+
+        if not cookie_value:
+            try:
+                all_cookies = cookies.get_all()
+
+                if isinstance(
+                    all_cookies,
+                    dict,
+                ):
+                    cookie_value = all_cookies.get(
+                        "f5tts_admin"
+                    )
+
+            except Exception:
+                pass
 
         if (
             ADMIN_USERNAME
@@ -1436,7 +1483,6 @@ def admin_panel():
             key="admin_page",
         )
 
-        # Save current admin page.
         page_cookie_set(
             "f5tts_admin_page",
             page,
@@ -1706,20 +1752,17 @@ def client_dashboard(user):
     ):
         deploy(user)
 
-    # -------------------------------------------------
+    # ========================================================
     # LIVE DEPLOYMENT MONITOR
-    #
-    # This fragment refreshes Kaggle status + logs
-    # automatically without requiring the user to
-    # manually refresh the website.
-    # -------------------------------------------------
+    # ========================================================
+
     if hasattr(
         st,
         "fragment",
     ):
 
         @st.fragment(
-            run_every=POLL_SECONDS
+            run_every=float(POLL_SECONDS)
         )
         def deployment_monitor():
             dep = refresh(user)
@@ -1740,11 +1783,12 @@ def client_dashboard(user):
                 and dep.public_url
             ):
                 st.success(
-                    "Your AI voice model is live and ready."
+                    "F5-TTS, Gradio and ngrok are live. "
+                    "Your voice generation system is ready."
                 )
 
                 st.link_button(
-                    "🚀 Start Voice Generation",
+                    "🎙️ Start voice generation",
                     dep.public_url,
                     use_container_width=True,
                 )
@@ -1755,9 +1799,22 @@ def client_dashboard(user):
                 )
 
                 st.code(
-                    (dep.last_error or "")[
-                        -12000:
-                    ]
+                    (
+                        dep.last_error
+                        or ""
+                    )[-12000:]
+                )
+
+            elif dep.status == "RUNNING":
+                st.info(
+                    "Kaggle GPU is running. "
+                    "Checking F5-TTS → Gradio → ngrok..."
+                )
+
+            elif dep.status == "QUEUED":
+                st.info(
+                    "Kaggle GPU is queued. "
+                    "Waiting for the F5-TTS server..."
                 )
 
             else:
@@ -1773,7 +1830,7 @@ def client_dashboard(user):
             st.code(
                 (
                     dep.last_logs
-                    or "Waiting for logs..."
+                    or "Waiting for live Kaggle logs..."
                 )[-30000:],
                 language="text",
             )
@@ -1799,11 +1856,12 @@ def client_dashboard(user):
             and dep.public_url
         ):
             st.success(
-                "Your AI voice model is live and ready."
+                "F5-TTS, Gradio and ngrok are live. "
+                "Your voice generation system is ready."
             )
 
             st.link_button(
-                "🚀 Start Voice Generation",
+                "🎙️ Start voice generation",
                 dep.public_url,
                 use_container_width=True,
             )
@@ -1814,9 +1872,22 @@ def client_dashboard(user):
             )
 
             st.code(
-                (dep.last_error or "")[
-                    -12000:
-                ]
+                (
+                    dep.last_error
+                    or ""
+                )[-12000:]
+            )
+
+        elif dep.status == "RUNNING":
+            st.info(
+                "Kaggle GPU is running. "
+                "Checking F5-TTS → Gradio → ngrok..."
+            )
+
+        elif dep.status == "QUEUED":
+            st.info(
+                "Kaggle GPU is queued. "
+                "Waiting for the F5-TTS server..."
             )
 
         else:
@@ -1832,7 +1903,7 @@ def client_dashboard(user):
         st.code(
             (
                 dep.last_logs
-                or "Waiting for logs..."
+                or "Waiting for live Kaggle logs..."
             )[-30000:],
             language="text",
         )
@@ -1874,7 +1945,6 @@ def client_panel(user):
             key="client_page",
         )
 
-        # Save current client page.
         page_cookie_set(
             "f5tts_client_page",
             page,
@@ -1900,20 +1970,100 @@ def client_panel(user):
 def main():
     branding_css()
 
+    # ========================================================
+    # AUTH COOKIE BOOTSTRAP
+    # ========================================================
+    #
+    # CookieManager may require one browser round-trip after
+    # a complete page refresh. This prevents the application
+    # from immediately interpreting the user as logged out.
+    #
+    # ========================================================
+
+    if not st.session_state.get(
+        "_auth_cookie_bootstrap_done",
+        False,
+    ):
+        try:
+            admin_cookie = None
+            client_cookie = None
+
+            try:
+                admin_cookie = cookies.get(
+                    "f5tts_admin"
+                )
+            except Exception:
+                pass
+
+            try:
+                client_cookie = cookies.get(
+                    "f5tts_session"
+                )
+            except Exception:
+                pass
+
+            if (
+                not admin_cookie
+                and not client_cookie
+            ):
+                try:
+                    all_cookies = cookies.get_all()
+
+                    if isinstance(
+                        all_cookies,
+                        dict,
+                    ):
+                        admin_cookie = all_cookies.get(
+                            "f5tts_admin"
+                        )
+
+                        client_cookie = all_cookies.get(
+                            "f5tts_session"
+                        )
+
+                except Exception:
+                    pass
+
+            st.session_state[
+                "_auth_cookie_bootstrap_done"
+            ] = True
+
+            # One extra browser round-trip allows
+            # CookieManager to become ready after refresh.
+            #
+            # This happens only once per fresh Streamlit
+            # session, so it cannot create an infinite loop.
+            if (
+                not admin_cookie
+                and not client_cookie
+            ):
+                st.rerun()
+
+        except Exception:
+            st.session_state[
+                "_auth_cookie_bootstrap_done"
+            ] = True
+
+    # ========================================================
+    # ADMIN AUTHENTICATION
+    # ========================================================
+
     if is_admin():
         admin_panel()
         return
 
-    # -------------------------------------------------
+    # ========================================================
     # CLIENT AUTHENTICATION
-    # -------------------------------------------------
+    # ========================================================
+
     user = st.session_state.get(
         "client_authenticated_user"
     )
 
-    # -------------------------------------------------
-    # FALLBACK TO PERSISTENT COOKIE
-    # -------------------------------------------------
+    # ========================================================
+    # RESTORE CLIENT FROM PERSISTENT COOKIE
+    # ========================================================
+
     if user is None:
         raw_cookie = cookie_get()
 
@@ -1935,16 +2085,18 @@ def main():
                     "user_id"
                 ] = user.id
 
-    # -------------------------------------------------
+    # ========================================================
     # NO CLIENT SESSION
-    # -------------------------------------------------
+    # ========================================================
+
     if not user:
         client_login_page()
         return
 
-    # -------------------------------------------------
+    # ========================================================
     # CLIENT ACCESS VALIDATION
-    # -------------------------------------------------
+    # ========================================================
+
     from datetime import datetime, timezone
 
     if (
