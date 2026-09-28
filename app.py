@@ -318,7 +318,7 @@ def build_kernel(
         "    try:",
         '        r=requests.get(public_url,timeout=10)',
         '        if r.status_code==200 and "gradio" in r.text.lower(): print("F5-TTS NODE ONLINE"); print("PUBLIC_URL:",public_url); break',
-        "    except Exception as e: print("[HEALTH] Waiting:",e)",
+        '   except Exception as e: print("[HEALTH] Waiting:",e)',
         "    time.sleep(5)",
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
         "while proc.poll() is None: time.sleep(10)",
