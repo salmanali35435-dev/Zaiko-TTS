@@ -7,7 +7,6 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import streamlit as st
@@ -52,6 +51,7 @@ SIGNUP_CODE = os.getenv(
     "",
 ).strip()
 
+
 # ============================================================
 # F5-TTS SESSION SETTINGS
 # ============================================================
@@ -67,6 +67,7 @@ ACTIVE_DEPLOYMENT_STATES = {
     "RUNNING",
     "READY",
 }
+
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -313,6 +314,10 @@ def run_kaggle(
 
 # ============================================================
 # KAGGLE STATUS
+#
+# IMPORTANT:
+# This checks the ACTUAL KAGGLE RUNTIME.
+# Notebook existence is NOT treated as active.
 # ============================================================
 
 def status(
@@ -351,7 +356,14 @@ def status(
             else "ERROR"
         ), out
 
-    if "running" in low:
+    # --------------------------------------------------------
+    # RUNNING MUST BE CHECKED BEFORE COMPLETE/SUCCESS.
+    # --------------------------------------------------------
+
+    if (
+        "running" in low
+        or "in progress" in low
+    ):
         return "RUNNING", out
 
     if (
@@ -362,13 +374,19 @@ def status(
 
     if (
         "complete" in low
+        or "completed" in low
         or "success" in low
+        or "succeeded" in low
+        or "stopped" in low
+        or "cancelled" in low
+        or "canceled" in low
     ):
         return "COMPLETE", out
 
     if (
         "error" in low
         or "failed" in low
+        or "failure" in low
     ):
         return "ERROR", out
 
@@ -378,9 +396,8 @@ def status(
 # ============================================================
 # LIVE KAGGLE LOG MONITOR
 #
-# IMPORTANT:
 # Logs are NEVER displayed to user.
-# They are only internally checked for PUBLIC_URL.
+# They are ONLY internally checked for PUBLIC_URL.
 # ============================================================
 
 def logs(
@@ -475,7 +492,6 @@ def logs(
 
 # ============================================================
 # KAGGLE INTERNAL API
-# Used only for finding/canceling active session.
 # ============================================================
 
 def _kaggle_internal_post(
@@ -546,7 +562,16 @@ def _kaggle_internal_post(
         )
 
 
-def get_kaggle_session_id(
+# ============================================================
+# GET ACTUAL KAGGLE RUNTIME
+#
+# IMPORTANT:
+# We DO NOT use the notebook's existence.
+# We inspect its runs and only return a session if
+# the run itself is actually active.
+# ============================================================
+
+def get_kaggle_runtime(
     username,
     token,
     kernel_slug,
@@ -568,12 +593,12 @@ def get_kaggle_session_id(
     )
 
     if code != 200:
-        return None
+        return None, "UNKNOWN"
 
     try:
         data = json.loads(body)
     except Exception:
-        return None
+        return None, "UNKNOWN"
 
     kernel = (
         data.get("kernel")
@@ -583,7 +608,7 @@ def get_kaggle_session_id(
     kernel_id = kernel.get("id")
 
     if not kernel_id:
-        return None
+        return None, "UNKNOWN"
 
     code, body = (
         _kaggle_internal_post(
@@ -602,50 +627,93 @@ def get_kaggle_session_id(
     )
 
     if code != 200:
-        return None
+        return None, "UNKNOWN"
 
     try:
         data = json.loads(body)
     except Exception:
-        return None
+        return None, "UNKNOWN"
 
     items = (
         data.get("items")
         or []
     )
 
-    # Prefer an actually active run.
+    # --------------------------------------------------------
+    # ONLY ACTIVE RUNS COUNT.
+    # Completed notebook versions are ignored.
+    # --------------------------------------------------------
+
     for item in items:
         run = item.get("run") or {}
 
         session_id = run.get("id")
+
+        raw_status = (
+            run.get("status")
+            or run.get("state")
+            or run.get("statusName")
+            or ""
+        )
+
         run_status = str(
-            run.get("status", "")
+            raw_status
         ).lower()
 
-        if (
-            session_id
-            and any(
-                x in run_status
-                for x in (
-                    "running",
-                    "queued",
-                    "pending",
-                )
+        if not session_id:
+            continue
+
+        if any(
+            word in run_status
+            for word in (
+                "running",
+                "queued",
+                "pending",
+                "initializing",
+                "starting",
+                "active",
             )
         ):
-            return str(session_id)
+            return (
+                str(session_id),
+                "RUNNING",
+            )
 
-    # Fallback to newest version/run.
-    for item in items:
-        run = item.get("run") or {}
-        session_id = run.get("id")
+    # --------------------------------------------------------
+    # No active run was found.
+    # --------------------------------------------------------
 
-        if session_id:
-            return str(session_id)
+    return None, "STOPPED"
 
-    return None
 
+# ============================================================
+# GET ACTIVE KAGGLE SESSION ID
+#
+# NEVER returns an old/completed run.
+# ============================================================
+
+def get_kaggle_session_id(
+    username,
+    token,
+    kernel_slug,
+):
+    session_id, runtime_state = (
+        get_kaggle_runtime(
+            username,
+            token,
+            kernel_slug,
+        )
+    )
+
+    if runtime_state != "RUNNING":
+        return None
+
+    return session_id
+
+
+# ============================================================
+# STOP ACTIVE KAGGLE SESSION
+# ============================================================
 
 def stop_kaggle_session(
     username,
@@ -663,11 +731,11 @@ def stop_kaggle_session(
     if not session_id:
         return (
             False,
-            "Active Kaggle session ID could not be found.",
+            "No active Kaggle runtime session found.",
         )
 
     # --------------------------------------------------------
-    # First: try CLI command if installed/supported.
+    # First try CLI command.
     # --------------------------------------------------------
 
     code, out = run_kaggle(
@@ -686,7 +754,7 @@ def stop_kaggle_session(
         return True, out
 
     # --------------------------------------------------------
-    # Fallback: Kaggle internal API.
+    # Fallback to Kaggle internal API.
     # --------------------------------------------------------
 
     status_code, body = (
@@ -721,8 +789,8 @@ def stop_kaggle_session(
 
 # ============================================================
 # READY TIMER MARKER
-# Stored in existing last_logs field.
-# User never sees it.
+# Stored inside existing last_logs.
+# User NEVER sees this.
 # ============================================================
 
 def make_ready_marker(timestamp):
@@ -761,7 +829,9 @@ def extract_ready_timestamp(dep):
 
 def deployment_seconds_left(dep):
     ready_at = (
-        extract_ready_timestamp(dep)
+        extract_ready_timestamp(
+            dep
+        )
     )
 
     if ready_at is None:
@@ -938,8 +1008,7 @@ def build_kernel(
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        # 20 MINUTES STARTS AFTER PUBLIC_URL IS READY.
+        # 20 MINUTES START AFTER PUBLIC_URL IS READY.
         # ----------------------------------------------------
 
         'print("[SESSION] F5-TTS READY. 20-minute session timer started.")',
@@ -1022,20 +1091,68 @@ def build_kernel(
 # ============================================================
 
 def deploy(user):
-    # Server-side protection.
     existing = get_deployment(
         user.id
     )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # DB state alone is NOT trusted.
+    # Verify actual Kaggle runtime before blocking deploy.
+    # --------------------------------------------------------
 
     if (
         existing
         and existing.status
         in ACTIVE_DEPLOYMENT_STATES
     ):
-        st.info(
-            "An F5-TTS session is already active."
+        c = get_credentials(
+            user.id
         )
-        return False
+
+        if c:
+            kaggle_user = c[
+                "kaggle_username"
+            ]
+
+            kaggle_token = c[
+                "kaggle_token"
+            ]
+
+            try:
+                runtime, runtime_state = (
+                    get_kaggle_runtime(
+                        kaggle_user,
+                        kaggle_token,
+                        existing.kernel_slug,
+                    )
+                )
+
+                if runtime_state != "RUNNING":
+                    upsert_deployment(
+                        user.id,
+                        kernel_id=existing.kernel_id,
+                        kernel_slug=existing.kernel_slug,
+                        status="IDLE",
+                        public_url=None,
+                        last_error=None,
+                        last_logs=None,
+                    )
+
+                else:
+                    st.info(
+                        "An F5-TTS session is already active."
+                    )
+                    return False
+
+            except Exception:
+                # If verification fails, do not blindly
+                # delete/disable a possibly active session.
+                st.info(
+                    "Unable to verify the current Kaggle session. "
+                    "Please try again."
+                )
+                return False
 
     c = get_credentials(
         user.id
@@ -1087,6 +1204,7 @@ def deploy(user):
     with tempfile.TemporaryDirectory(
         prefix="f5tts-"
     ) as tmp:
+
         folder = Path(tmp)
 
         build_kernel(
@@ -1172,6 +1290,10 @@ def deploy(user):
 
 # ============================================================
 # REFRESH DEPLOYMENT
+#
+# IMPORTANT:
+# READY is NOT trusted blindly.
+# Actual Kaggle runtime is checked first.
 # ============================================================
 
 def refresh(user):
@@ -1186,44 +1308,96 @@ def refresh(user):
     if not dep or not c:
         return dep
 
-    # --------------------------------------------------------
-    # READY SESSION:
-    # Do not stream logs again.
-    # Just maintain the persistent 20-minute session.
-    # --------------------------------------------------------
+    kaggle_user = c[
+        "kaggle_username"
+    ]
+
+    kaggle_token = c[
+        "kaggle_token"
+    ]
+
+    # ========================================================
+    # READY STATE
+    #
+    # BEFORE:
+    # READY was returned immediately from database.
+    #
+    # NOW:
+    # We verify actual Kaggle runtime.
+    # ========================================================
 
     if (
         dep.status == "READY"
         and dep.public_url
     ):
-        remaining = (
-            deployment_seconds_left(
-                dep
-            )
-        )
 
-        # If marker exists and timer expired,
-        # cancel the Kaggle session.
-        if (
-            remaining is not None
-            and remaining <= 0
-        ):
-            username = c[
-                "kaggle_username"
-            ]
+        # ----------------------------------------------------
+        # First check actual Kaggle CLI runtime.
+        # ----------------------------------------------------
 
-            token = c[
-                "kaggle_token"
-            ]
-
-            try:
-                stop_kaggle_session(
-                    username,
-                    token,
-                    dep.kernel_slug,
+        try:
+            runtime_status, runtime_text = (
+                status(
+                    dep.kernel_id,
+                    kaggle_user,
+                    kaggle_token,
                 )
-            except Exception:
-                pass
+            )
+
+        except Exception:
+            runtime_status = "UNKNOWN"
+            runtime_text = ""
+
+        # ----------------------------------------------------
+        # If CLI says RUNNING, READY is valid.
+        # ----------------------------------------------------
+
+        if runtime_status == "RUNNING":
+
+            remaining = (
+                deployment_seconds_left(
+                    dep
+                )
+            )
+
+            if (
+                remaining is not None
+                and remaining <= 0
+            ):
+                try:
+                    stop_kaggle_session(
+                        kaggle_user,
+                        kaggle_token,
+                        dep.kernel_slug,
+                    )
+                except Exception:
+                    pass
+
+                upsert_deployment(
+                    user.id,
+                    kernel_id=dep.kernel_id,
+                    kernel_slug=dep.kernel_slug,
+                    status="IDLE",
+                    public_url=None,
+                    last_error=None,
+                    last_logs=None,
+                )
+
+                return get_deployment(
+                    user.id
+                )
+
+            return dep
+
+        # ----------------------------------------------------
+        # CLI explicitly says complete/stopped.
+        # Notebook still exists, but SESSION is gone.
+        # ----------------------------------------------------
+
+        if runtime_status in (
+            "COMPLETE",
+            "NOT_FOUND",
+        ):
 
             upsert_deployment(
                 user.id,
@@ -1239,21 +1413,99 @@ def refresh(user):
                 user.id
             )
 
-        # READY remains stable.
-        # No log fetch.
+        # ----------------------------------------------------
+        # If CLI is uncertain, use Kaggle internal runtime
+        # API. This is specifically to distinguish:
+        #
+        # notebook exists
+        # vs
+        # notebook has an ACTIVE RUN.
+        # ----------------------------------------------------
+
+        try:
+            session_id, runtime_state = (
+                get_kaggle_runtime(
+                    kaggle_user,
+                    kaggle_token,
+                    dep.kernel_slug,
+                )
+            )
+
+        except Exception:
+            session_id = None
+            runtime_state = "UNKNOWN"
+
+        if runtime_state == "RUNNING":
+
+            remaining = (
+                deployment_seconds_left(
+                    dep
+                )
+            )
+
+            if (
+                remaining is not None
+                and remaining <= 0
+            ):
+                try:
+                    stop_kaggle_session(
+                        kaggle_user,
+                        kaggle_token,
+                        dep.kernel_slug,
+                    )
+                except Exception:
+                    pass
+
+                upsert_deployment(
+                    user.id,
+                    kernel_id=dep.kernel_id,
+                    kernel_slug=dep.kernel_slug,
+                    status="IDLE",
+                    public_url=None,
+                    last_error=None,
+                    last_logs=None,
+                )
+
+                return get_deployment(
+                    user.id
+                )
+
+            return dep
+
+        # ----------------------------------------------------
+        # Internal API confirms NO active run.
+        #
+        # This is the critical fix.
+        # Notebook remains on Kaggle, but Deploy becomes
+        # available because the runtime session is stopped.
+        # ----------------------------------------------------
+
+        if runtime_state == "STOPPED":
+
+            upsert_deployment(
+                user.id,
+                kernel_id=dep.kernel_id,
+                kernel_slug=dep.kernel_slug,
+                status="IDLE",
+                public_url=None,
+                last_error=None,
+                last_logs=None,
+            )
+
+            return get_deployment(
+                user.id
+            )
+
+        # ----------------------------------------------------
+        # If both APIs are temporarily uncertain, preserve
+        # current state rather than falsely killing it.
+        # ----------------------------------------------------
+
         return dep
 
-    kaggle_user = c[
-        "kaggle_username"
-    ]
-
-    kaggle_token = c[
-        "kaggle_token"
-    ]
-
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
+    # ========================================================
+    # NON-READY STATE
+    # ========================================================
 
     try:
         s, stext = status(
@@ -1269,10 +1521,9 @@ def refresh(user):
             f"{exc}"
         )
 
-    # --------------------------------------------------------
-    # LOGS ARE INTERNAL ONLY.
-    # Never rendered to UI.
-    # --------------------------------------------------------
+    # ========================================================
+    # LOGS INTERNAL ONLY
+    # ========================================================
 
     try:
         lg = logs(
@@ -1291,9 +1542,9 @@ def refresh(user):
         lg + "\n" + stext
     ).strip()
 
-    # --------------------------------------------------------
-    # FIND PUBLIC URL
-    # --------------------------------------------------------
+    # ========================================================
+    # PUBLIC URL
+    # ========================================================
 
     url = dep.public_url
 
@@ -1308,9 +1559,9 @@ def refresh(user):
             ").,;\"'"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # FALLBACK NGROK URL
-    # --------------------------------------------------------
+    # ========================================================
 
     if not url:
         ngrok_matches = re.findall(
@@ -1324,9 +1575,9 @@ def refresh(user):
                 ").,;\"'"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DETERMINE STATE
-    # --------------------------------------------------------
+    # ========================================================
 
     if url:
         final = "READY"
@@ -1341,20 +1592,23 @@ def refresh(user):
         final = "QUEUED"
 
     elif s == "COMPLETE":
-        final = "COMPLETE"
+        final = "IDLE"
+
+    elif s == "NOT_FOUND":
+        final = "IDLE"
 
     else:
         final = s
 
-    # --------------------------------------------------------
+    # ========================================================
     # READY TIMESTAMP
-    # Only create it when first becoming READY.
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         final == "READY"
         and url
     ):
+
         ready_at = (
             extract_ready_timestamp(
                 dep
@@ -1383,9 +1637,32 @@ def refresh(user):
             user.id
         )
 
-    # --------------------------------------------------------
-    # NON-READY STATE
-    # --------------------------------------------------------
+    # ========================================================
+    # STOPPED / COMPLETE
+    #
+    # Notebook can remain on Kaggle.
+    # We only reset the app deployment state.
+    # ========================================================
+
+    if final == "IDLE":
+
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="IDLE",
+            public_url=None,
+            last_error=None,
+            last_logs=None,
+        )
+
+        return get_deployment(
+            user.id
+        )
+
+    # ========================================================
+    # OTHER STATES
+    # ========================================================
 
     upsert_deployment(
         user.id,
@@ -2449,8 +2726,6 @@ def client_dashboard(user):
 
     # ========================================================
     # PLAN COUNTDOWN
-    # Browser-side only.
-    # No Streamlit reruns every second.
     # ========================================================
 
     seconds = client_access_seconds(
@@ -2561,7 +2836,7 @@ def client_dashboard(user):
     st.divider()
 
     # ========================================================
-    # GET CURRENT DEPLOYMENT
+    # GET DATABASE DEPLOYMENT
     # ========================================================
 
     dep = get_deployment(
@@ -2569,31 +2844,41 @@ def client_dashboard(user):
     )
 
     # ========================================================
-    # IMPORTANT:
-    # Refresh only when we actually need deployment monitoring.
-    # READY does NOT call refresh repeatedly.
+    # CRITICAL FIX:
+    #
+    # If DB says active/READY, VERIFY REAL KAGGLE SESSION.
+    #
+    # This prevents:
+    #
+    # Notebook exists
+    #       +
+    # Session stopped
+    #       =
+    # WRONG disabled Deploy button
     # ========================================================
 
     if (
         dep
         and dep.status
-        in {
-            "SUBMITTING",
-            "QUEUED",
-            "RUNNING",
-        }
+        in ACTIVE_DEPLOYMENT_STATES
     ):
-        active_session = True
+        with st.spinner(
+            "Checking F5-TTS session..."
+        ):
+            dep = refresh(
+                user
+            )
 
-    elif (
+    # ========================================================
+    # AFTER REFRESH:
+    # active_session ONLY means ACTUAL ACTIVE STATE.
+    # ========================================================
+
+    active_session = (
         dep
-        and dep.status == "READY"
-        and dep.public_url
-    ):
-        active_session = True
-
-    else:
-        active_session = False
+        and dep.status
+        in ACTIVE_DEPLOYMENT_STATES
+    )
 
     # ========================================================
     # DEPLOY BUTTON
@@ -2624,6 +2909,7 @@ def client_dashboard(user):
         and dep.status == "READY"
         and dep.public_url
     ):
+
         remaining = (
             deployment_seconds_left(
                 dep
@@ -2634,7 +2920,10 @@ def client_dashboard(user):
             remaining is not None
             and remaining <= 0
         ):
-            dep = refresh(user)
+            dep = refresh(
+                user
+            )
+
             remaining = (
                 deployment_seconds_left(
                     dep
@@ -2646,6 +2935,7 @@ def client_dashboard(user):
             and dep.status == "READY"
             and dep.public_url
         ):
+
             st.markdown(
                 '<div class="f5-ready">'
                 '<b>F5-TTS is ready.</b><br>'
@@ -2655,8 +2945,7 @@ def client_dashboard(user):
             )
 
             # ------------------------------------------------
-            # 20-MINUTE SESSION COUNTDOWN
-            # Browser-side only.
+            # SESSION COUNTDOWN
             # ------------------------------------------------
 
             timer_seconds = (
@@ -2751,7 +3040,6 @@ def client_dashboard(user):
 
             # ------------------------------------------------
             # START VOICE GENERATION
-            # EXACT LABEL PRESERVED
             # ------------------------------------------------
 
             st.link_button(
@@ -2763,13 +3051,14 @@ def client_dashboard(user):
             st.divider()
 
             # ------------------------------------------------
-            # STOP BUTTON
+            # STOP F5-TTS SESSION
             # ------------------------------------------------
 
             if st.button(
                 "⏹ Stop F5-TTS session",
                 use_container_width=True,
             ):
+
                 creds = get_credentials(
                     user.id
                 )
@@ -2780,6 +3069,7 @@ def client_dashboard(user):
                     )
 
                 else:
+
                     with st.spinner(
                         "Stopping F5-TTS GPU session..."
                     ):
@@ -2796,6 +3086,7 @@ def client_dashboard(user):
                         )
 
                     if ok:
+
                         upsert_deployment(
                             user.id,
                             kernel_id=dep.kernel_id,
@@ -2811,35 +3102,46 @@ def client_dashboard(user):
                             "GPU session has been released."
                         )
 
-                        time.sleep(0.5)
+                        time.sleep(
+                            0.5
+                        )
 
                         st.rerun()
 
                     else:
+
                         st.error(
                             "Unable to stop the Kaggle session."
                         )
 
-                        # Do NOT show Kaggle logs.
                         st.caption(
-                            "Kaggle did not accept the session-stop request."
+                            "No active Kaggle runtime was accepted for stopping."
                         )
 
             # ------------------------------------------------
-            # CRITICAL:
-            # NO deployment_monitor here.
-            # READY PAGE IS STABLE.
+            # NO MONITORING FRAGMENT IN READY STATE.
             # ------------------------------------------------
 
             return
 
     # ========================================================
-    # NO ACTIVE DEPLOYMENT
+    # NO DEPLOYMENT
     # ========================================================
 
     if not dep:
         st.info(
             "No F5-TTS deployment yet."
+        )
+        return
+
+    # ========================================================
+    # IDLE
+    # ========================================================
+
+    if dep.status == "IDLE":
+        st.info(
+            "No active F5-TTS session. "
+            "Deploy F5-TTS to start a new voice generation session."
         )
         return
 
@@ -2868,10 +3170,8 @@ def client_dashboard(user):
     # ========================================================
     # ACTIVE MONITOR
     #
-    # Logs are NOT rendered.
+    # Logs are NEVER shown.
     # Only progress/status is shown.
-    # When PUBLIC_URL appears, full app reruns once.
-    # Then this fragment disappears because state is READY.
     # ========================================================
 
     if (
@@ -2894,6 +3194,7 @@ def client_dashboard(user):
                 )
             )
             def deployment_monitor():
+
                 with st.spinner(
                     "Checking F5-TTS deployment..."
                 ):
@@ -2913,33 +3214,44 @@ def client_dashboard(user):
                     and current.public_url
                 ):
                     # PUBLIC_URL detected.
-                    # Stop this monitoring fragment
-                    # and perform one clean full rerun.
+                    # One clean full rerun.
                     st.rerun()
 
                 elif current.status == "ERROR":
+
                     st.error(
                         "Kaggle kernel reported an error."
                     )
 
                 elif current.status == "RUNNING":
+
                     st.info(
                         "Kaggle GPU is running. "
                         "F5-TTS is starting..."
                     )
 
                 elif current.status == "QUEUED":
+
                     st.info(
                         "Kaggle GPU is queued. "
                         "Waiting for F5-TTS..."
                     )
 
                 elif current.status == "SUBMITTING":
+
                     st.info(
                         "Submitting F5-TTS to Kaggle..."
                     )
 
+                elif current.status == "IDLE":
+
+                    st.info(
+                        "F5-TTS session is not running. "
+                        "Deploy again to start it."
+                    )
+
                 else:
+
                     st.info(
                         "Starting F5-TTS..."
                     )
@@ -2947,6 +3259,7 @@ def client_dashboard(user):
             deployment_monitor()
 
         else:
+
             with st.spinner(
                 "Checking F5-TTS deployment..."
             ):
@@ -2961,21 +3274,39 @@ def client_dashboard(user):
             ):
                 st.rerun()
 
-            elif dep and dep.status == "ERROR":
+            elif (
+                dep
+                and dep.status == "ERROR"
+            ):
                 st.error(
                     "Kaggle kernel reported an error."
                 )
 
-            elif dep and dep.status == "RUNNING":
+            elif (
+                dep
+                and dep.status == "RUNNING"
+            ):
                 st.info(
                     "Kaggle GPU is running. "
                     "F5-TTS is starting..."
                 )
 
-            elif dep and dep.status == "QUEUED":
+            elif (
+                dep
+                and dep.status == "QUEUED"
+            ):
                 st.info(
                     "Kaggle GPU is queued. "
                     "Waiting for F5-TTS..."
+                )
+
+            elif (
+                dep
+                and dep.status == "IDLE"
+            ):
+                st.info(
+                    "F5-TTS session is not running. "
+                    "Deploy again to start it."
                 )
 
             else:
@@ -2986,7 +3317,7 @@ def client_dashboard(user):
         return
 
     # ========================================================
-    # IDLE / UNKNOWN
+    # UNKNOWN
     # ========================================================
 
     st.info(
@@ -3024,6 +3355,7 @@ def client_panel(user):
         )
 
     with st.sidebar:
+
         st.markdown(
             "### ZAIKO AI STUDIO"
         )
@@ -3078,6 +3410,7 @@ def main():
         "_auth_cookie_bootstrap_done",
         False,
     ):
+
         try:
             admin_cookie = None
             client_cookie = None
@@ -3100,6 +3433,7 @@ def main():
                 not admin_cookie
                 and not client_cookie
             ):
+
                 try:
                     all_cookies = (
                         cookies.get_all()
@@ -3109,6 +3443,7 @@ def main():
                         all_cookies,
                         dict,
                     ):
+
                         admin_cookie = (
                             all_cookies.get(
                                 "f5tts_admin"
@@ -3135,6 +3470,7 @@ def main():
                 st.rerun()
 
         except Exception:
+
             st.session_state[
                 "_auth_cookie_bootstrap_done"
             ] = True
@@ -3162,9 +3498,11 @@ def main():
     # ========================================================
 
     if user is None:
+
         raw_cookie = cookie_get()
 
         if raw_cookie:
+
             user = (
                 get_user_by_session(
                     raw_cookie
@@ -3172,6 +3510,7 @@ def main():
             )
 
             if user:
+
                 st.session_state[
                     "client_authenticated_user"
                 ] = user
@@ -3208,6 +3547,7 @@ def main():
             )
         )
     ):
+
         st.session_state.pop(
             "client_authenticated_user",
             None,
@@ -3257,6 +3597,7 @@ try:
     main()
 
 except Exception as exc:
+
     st.error(
         "Application error"
     )
