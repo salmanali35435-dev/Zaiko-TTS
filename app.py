@@ -57,11 +57,6 @@ SIGNUP_CODE = os.getenv(
 # F5-TTS SESSION SETTINGS
 # ============================================================
 
-F5_SESSION_MINUTES = 20
-F5_SESSION_SECONDS = F5_SESSION_MINUTES * 60
-
-READY_MARKER = "__ZAIKO_READY_AT__:"
-
 ACTIVE_DEPLOYMENT_STATES = {
     "SUBMITTING",
     "QUEUED",
@@ -791,68 +786,6 @@ def stop_kaggle_session(
 
 
 # ============================================================
-# READY TIMER MARKER
-# Stored inside existing last_logs.
-# User NEVER sees this.
-# ============================================================
-
-def make_ready_marker(timestamp):
-    return (
-        f"{READY_MARKER}"
-        f"{timestamp:.6f}"
-    )
-
-
-def extract_ready_timestamp(dep):
-    if not dep:
-        return None
-
-    text = getattr(
-        dep,
-        "last_logs",
-        None,
-    ) or ""
-
-    match = re.search(
-        re.escape(READY_MARKER)
-        + r"\s*([0-9]+(?:\.[0-9]+)?)",
-        text,
-    )
-
-    if not match:
-        return None
-
-    try:
-        return float(
-            match.group(1)
-        )
-    except Exception:
-        return None
-
-
-def deployment_seconds_left(dep):
-    ready_at = (
-        extract_ready_timestamp(
-            dep
-        )
-    )
-
-    if ready_at is None:
-        return None
-
-    return max(
-        0,
-        int(
-            F5_SESSION_SECONDS
-            - (
-                time.time()
-                - ready_at
-            )
-        ),
-    )
-
-
-# ============================================================
 # FIND KERNEL
 # ============================================================
 
@@ -1011,30 +944,13 @@ def build_kernel(
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
 
         # ----------------------------------------------------
-        # 20 MINUTES START AFTER PUBLIC_URL IS READY.
+        # NO APPLICATION SESSION TIMEOUT.
+        # Kaggle controls the runtime lifecycle.
         # ----------------------------------------------------
 
-        'print("[SESSION] F5-TTS READY. 20-minute session timer started.")',
+        'print("[SESSION] F5-TTS READY. No application session timeout.")',
 
-        'session_deadline=time.time()+1200',
-
-        'while proc.poll() is None and time.time()<session_deadline: time.sleep(10)',
-
-        'if proc.poll() is None:',
-
-        '    print("[SESSION] 20-minute session limit reached. Stopping F5-TTS.")',
-
-        '    try: proc.terminate()',
-
-        '    except Exception: pass',
-
-        '    try: proc.wait(timeout=15)',
-
-        '    except Exception:',
-
-        '        try: proc.kill()',
-
-        '        except Exception: pass',
+        'while proc.poll() is None: time.sleep(10)',
 
         'print("[F5] Process exited:",proc.returncode)',
     ]
@@ -1149,8 +1065,6 @@ def deploy(user):
                     return False
 
             except Exception:
-                # If verification fails, do not blindly
-                # delete/disable a possibly active session.
                 st.info(
                     "Unable to verify the current Kaggle session. "
                     "Please try again."
@@ -1332,33 +1246,6 @@ def refresh(user):
 
         if runtime_status == "RUNNING":
 
-            remaining = deployment_seconds_left(dep)
-
-            if (
-                remaining is not None
-                and remaining <= 0
-            ):
-                try:
-                    stop_kaggle_session(
-                        kaggle_user,
-                        kaggle_token,
-                        dep.kernel_slug,
-                    )
-                except Exception:
-                    pass
-
-                upsert_deployment(
-                    user.id,
-                    kernel_id=dep.kernel_id,
-                    kernel_slug=dep.kernel_slug,
-                    status="IDLE",
-                    public_url=None,
-                    last_error=None,
-                    last_logs=None,
-                )
-
-                return get_deployment(user.id)
-
             # Existing READY remains READY only when
             # Kaggle confirms an actual RUNNING runtime.
             if dep.status == "READY":
@@ -1407,33 +1294,6 @@ def refresh(user):
 
             # Actual active run confirmed.
             if runtime_state == "RUNNING":
-
-                remaining = deployment_seconds_left(dep)
-
-                if (
-                    remaining is not None
-                    and remaining <= 0
-                ):
-                    try:
-                        stop_kaggle_session(
-                            kaggle_user,
-                            kaggle_token,
-                            dep.kernel_slug,
-                        )
-                    except Exception:
-                        pass
-
-                    upsert_deployment(
-                        user.id,
-                        kernel_id=dep.kernel_id,
-                        kernel_slug=dep.kernel_slug,
-                        status="IDLE",
-                        public_url=None,
-                        last_error=None,
-                        last_logs=None,
-                    )
-
-                    return get_deployment(user.id)
 
                 if dep.status == "READY":
                     return dep
@@ -1528,15 +1388,7 @@ def refresh(user):
         # ----------------------------------------------------
 
         if url:
-            ready_at = extract_ready_timestamp(dep)
-
-            if ready_at is None:
-                ready_at = time.time()
-
-            stored_logs = (
-                f"{make_ready_marker(ready_at)}\n"
-                f"{combined[-29900:]}"
-            )
+            stored_logs = combined[-30000:]
 
             upsert_deployment(
                 user.id,
@@ -1545,7 +1397,7 @@ def refresh(user):
                 status="READY",
                 public_url=url,
                 last_error=None,
-                last_logs=stored_logs[-30000:],
+                last_logs=stored_logs,
             )
 
             return get_deployment(user.id)
@@ -1678,15 +1530,7 @@ def refresh(user):
                 )
 
         if url:
-            ready_at = extract_ready_timestamp(dep)
-
-            if ready_at is None:
-                ready_at = time.time()
-
-            stored_logs = (
-                f"{make_ready_marker(ready_at)}\n"
-                f"{combined[-29900:]}"
-            )
+            stored_logs = combined[-30000:]
 
             upsert_deployment(
                 user.id,
@@ -1695,7 +1539,7 @@ def refresh(user):
                 status="READY",
                 public_url=url,
                 last_error=None,
-                last_logs=stored_logs[-30000:],
+                last_logs=stored_logs,
             )
 
             return get_deployment(user.id)
@@ -2990,219 +2834,99 @@ def client_dashboard(user):
         and dep.public_url
     ):
 
-        remaining = (
-            deployment_seconds_left(
-                dep
-            )
+        st.markdown(
+            '<div class="f5-ready">'
+            '<b>F5-TTS is ready.</b><br>'
+            "Your voice generation system is live."
+            "</div>",
+            unsafe_allow_html=True,
         )
 
-        if (
-            remaining is not None
-            and remaining <= 0
+        # ------------------------------------------------
+        # START VOICE GENERATION
+        # ------------------------------------------------
+
+        st.link_button(
+            "🎙️ Start voice generation",
+            dep.public_url,
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        # ------------------------------------------------
+        # STOP F5-TTS SESSION
+        # ------------------------------------------------
+
+        if st.button(
+            "⏹ Stop F5-TTS session",
+            use_container_width=True,
         ):
-            dep = refresh(
-                user
+
+            creds = get_credentials(
+                user.id
             )
 
-            remaining = (
-                deployment_seconds_left(
-                    dep
-                )
-            )
-
-        if (
-            dep
-            and dep.status == "READY"
-            and dep.public_url
-        ):
-
-            st.markdown(
-                '<div class="f5-ready">'
-                '<b>F5-TTS is ready.</b><br>'
-                "Your voice generation system is live."
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-            # ------------------------------------------------
-            # SESSION COUNTDOWN
-            # ------------------------------------------------
-
-            timer_seconds = (
-                remaining
-                if remaining is not None
-                else F5_SESSION_SECONDS
-            )
-
-            st.markdown(
-                f"""
-                <div style="
-                    padding:10px 0;
-                    color:#8ea8c7;
-                ">
-                    Session time remaining:
-                    <span
-                        id="f5-session-countdown"
-                        style="
-                            color:#35a7ff;
-                            font-weight:800;
-                        "
-                    >
-                        {format_countdown(timer_seconds)}
-                    </span>
-                </div>
-
-                <script>
-                (function() {{
-                    let remaining =
-                        {timer_seconds};
-
-                    function updateF5Timer() {{
-                        const el =
-                            document.getElementById(
-                                "f5-session-countdown"
-                            );
-
-                        if (!el) return;
-
-                        if (remaining <= 0) {{
-                            el.innerText =
-                                "Session ending...";
-                            return;
-                        }}
-
-                        const days =
-                            Math.floor(
-                                remaining / 86400
-                            );
-
-                        let rem =
-                            remaining % 86400;
-
-                        const hours =
-                            Math.floor(
-                                rem / 3600
-                            );
-
-                        rem %= 3600;
-
-                        const minutes =
-                            Math.floor(
-                                rem / 60
-                            );
-
-                        const seconds =
-                            rem % 60;
-
-                        el.innerText =
-                            days + " days "
-                            + String(hours).padStart(2, "0")
-                            + " hours "
-                            + String(minutes).padStart(2, "0")
-                            + " minutes "
-                            + String(seconds).padStart(2, "0")
-                            + " seconds";
-
-                        remaining--;
-                    }}
-
-                    updateF5Timer();
-
-                    setInterval(
-                        updateF5Timer,
-                        1000
-                    );
-                }})();
-                </script>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            # ------------------------------------------------
-            # START VOICE GENERATION
-            # ------------------------------------------------
-
-            st.link_button(
-                "🎙️ Start voice generation",
-                dep.public_url,
-                use_container_width=True,
-            )
-
-            st.divider()
-
-            # ------------------------------------------------
-            # STOP F5-TTS SESSION
-            # ------------------------------------------------
-
-            if st.button(
-                "⏹ Stop F5-TTS session",
-                use_container_width=True,
-            ):
-
-                creds = get_credentials(
-                    user.id
+            if not creds:
+                st.error(
+                    "Kaggle settings are missing."
                 )
 
-                if not creds:
-                    st.error(
-                        "Kaggle settings are missing."
+            else:
+
+                with st.spinner(
+                    "Stopping F5-TTS GPU session..."
+                ):
+                    ok, message = (
+                        stop_kaggle_session(
+                            creds[
+                                "kaggle_username"
+                            ],
+                            creds[
+                                "kaggle_token"
+                            ],
+                            dep.kernel_slug,
+                        )
                     )
+
+                if ok:
+
+                    upsert_deployment(
+                        user.id,
+                        kernel_id=dep.kernel_id,
+                        kernel_slug=dep.kernel_slug,
+                        status="IDLE",
+                        public_url=None,
+                        last_error=None,
+                        last_logs=None,
+                    )
+
+                    st.success(
+                        "F5-TTS session stopped. "
+                        "GPU session has been released."
+                    )
+
+                    time.sleep(
+                        0.5
+                    )
+
+                    st.rerun()
 
                 else:
 
-                    with st.spinner(
-                        "Stopping F5-TTS GPU session..."
-                    ):
-                        ok, message = (
-                            stop_kaggle_session(
-                                creds[
-                                    "kaggle_username"
-                                ],
-                                creds[
-                                    "kaggle_token"
-                                ],
-                                dep.kernel_slug,
-                            )
-                        )
+                    st.error(
+                        "Unable to stop the Kaggle session."
+                    )
 
-                    if ok:
+                    st.caption(
+                        "No active Kaggle runtime was accepted for stopping."
+                    )
 
-                        upsert_deployment(
-                            user.id,
-                            kernel_id=dep.kernel_id,
-                            kernel_slug=dep.kernel_slug,
-                            status="IDLE",
-                            public_url=None,
-                            last_error=None,
-                            last_logs=None,
-                        )
+        # ------------------------------------------------
+        # NO MONITORING FRAGMENT IN READY STATE.
+        # ------------------------------------------------
 
-                        st.success(
-                            "F5-TTS session stopped. "
-                            "GPU session has been released."
-                        )
-
-                        time.sleep(
-                            0.5
-                        )
-
-                        st.rerun()
-
-                    else:
-
-                        st.error(
-                            "Unable to stop the Kaggle session."
-                        )
-
-                        st.caption(
-                            "No active Kaggle runtime was accepted for stopping."
-                        )
-
-            # ------------------------------------------------
-            # NO MONITORING FRAGMENT IN READY STATE.
-            # ------------------------------------------------
-
-            return
+        return
 
     # ========================================================
     # NO DEPLOYMENT
