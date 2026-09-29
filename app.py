@@ -1,4 +1,10 @@
-import base64, json, os, re, subprocess, tempfile, time
+import base64
+import json
+import os
+import re
+import subprocess
+import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
@@ -30,10 +36,37 @@ from database import (
     admin_stats,
 )
 
+
 APP_NAME = "ZAIKO AI STUDIO"
-SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
-SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
+
+SESSION_DAYS = int(
+    os.getenv("SESSION_DAYS", "30")
+)
+
+POLL_SECONDS = int(
+    os.getenv("POLL_SECONDS", "5")
+)
+
+SIGNUP_CODE = os.getenv(
+    "SIGNUP_CODE",
+    "",
+).strip()
+
+# ============================================================
+# F5-TTS SESSION SETTINGS
+# ============================================================
+
+F5_SESSION_MINUTES = 20
+F5_SESSION_SECONDS = F5_SESSION_MINUTES * 60
+
+READY_MARKER = "__ZAIKO_READY_AT__:"
+
+ACTIVE_DEPLOYMENT_STATES = {
+    "SUBMITTING",
+    "QUEUED",
+    "RUNNING",
+    "READY",
+}
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -50,8 +83,14 @@ def boot():
 
 boot()
 
-cookies = stx.CookieManager(key="f5tts-cookie")
+cookies = stx.CookieManager(
+    key="f5tts-cookie"
+)
 
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def normalize_domain(v):
     v = v.strip()
@@ -59,7 +98,9 @@ def normalize_domain(v):
     if not v:
         return ""
 
-    if not v.startswith(("http://", "https://")):
+    if not v.startswith(
+        ("http://", "https://")
+    ):
         v = "https://" + v
 
     p = urlparse(v)
@@ -71,7 +112,9 @@ def normalize_domain(v):
 
 def cookie_get():
     try:
-        value = cookies.get("f5tts_session")
+        value = cookies.get(
+            "f5tts_session"
+        )
 
         if value:
             return value
@@ -79,7 +122,10 @@ def cookie_get():
         try:
             all_cookies = cookies.get_all()
 
-            if isinstance(all_cookies, dict):
+            if isinstance(
+                all_cookies,
+                dict,
+            ):
                 return all_cookies.get(
                     "f5tts_session"
                 )
@@ -101,7 +147,10 @@ def cookie_set(v):
         cookies.set(
             "f5tts_session",
             v,
-            expires_at=time.time() + SESSION_DAYS * 86400,
+            expires_at=(
+                time.time()
+                + SESSION_DAYS * 86400
+            ),
         )
 
         return True
@@ -118,28 +167,27 @@ def page_cookie_get(name, default):
     try:
         value = cookies.get(name)
 
-        if value in (
+        allowed = (
             "Dashboard",
             "Settings",
             "Active Clients",
             "Revoked Clients",
             "Create New Client",
-        ):
+        )
+
+        if value in allowed:
             return value
 
         try:
             all_cookies = cookies.get_all()
 
-            if isinstance(all_cookies, dict):
+            if isinstance(
+                all_cookies,
+                dict,
+            ):
                 value = all_cookies.get(name)
 
-                if value in (
-                    "Dashboard",
-                    "Settings",
-                    "Active Clients",
-                    "Revoked Clients",
-                    "Create New Client",
-                ):
+                if value in allowed:
                     return value
 
         except Exception:
@@ -159,7 +207,10 @@ def page_cookie_set(name, value):
         cookies.set(
             name,
             value,
-            expires_at=time.time() + SESSION_DAYS * 86400,
+            expires_at=(
+                time.time()
+                + SESSION_DAYS * 86400
+            ),
         )
 
     except Exception:
@@ -183,15 +234,30 @@ def logout():
         delete_session(raw_cookie)
 
     try:
-        cookies.delete("f5tts_session")
-        cookies.delete("f5tts_client_page")
+        cookies.delete(
+            "f5tts_session"
+        )
+
+        cookies.delete(
+            "f5tts_client_page"
+        )
+
     except Exception:
         pass
 
     st.rerun()
 
 
-def run_kaggle(args, user, token, timeout=20):
+# ============================================================
+# KAGGLE COMMAND
+# ============================================================
+
+def run_kaggle(
+    args,
+    user,
+    token,
+    timeout=20,
+):
     env = os.environ.copy()
 
     env["KAGGLE_USERNAME"] = user
@@ -245,9 +311,21 @@ def run_kaggle(args, user, token, timeout=20):
         )
 
 
-def status(kernel, user, token):
+# ============================================================
+# KAGGLE STATUS
+# ============================================================
+
+def status(
+    kernel,
+    user,
+    token,
+):
     code, out = run_kaggle(
-        ["kernels", "status", kernel],
+        [
+            "kernels",
+            "status",
+            kernel,
+        ],
         user,
         token,
         12,
@@ -276,24 +354,40 @@ def status(kernel, user, token):
     if "running" in low:
         return "RUNNING", out
 
-    if "queued" in low or "pending" in low:
+    if (
+        "queued" in low
+        or "pending" in low
+    ):
         return "QUEUED", out
 
-    if "complete" in low or "success" in low:
+    if (
+        "complete" in low
+        or "success" in low
+    ):
         return "COMPLETE", out
 
-    if "error" in low or "failed" in low:
+    if (
+        "error" in low
+        or "failed" in low
+    ):
         return "ERROR", out
 
     return "UNKNOWN", out
 
 
 # ============================================================
-# UPDATED: LIVE KAGGLE LOG MONITOR
-# PUBLIC_URL MILTE HI STOP
+# LIVE KAGGLE LOG MONITOR
+#
+# IMPORTANT:
+# Logs are NEVER displayed to user.
+# They are only internally checked for PUBLIC_URL.
 # ============================================================
 
-def logs(kernel, user, token):
+def logs(
+    kernel,
+    user,
+    token,
+):
     env = os.environ.copy()
 
     env["KAGGLE_USERNAME"] = user
@@ -318,14 +412,18 @@ def logs(kernel, user, token):
         )
 
     except Exception as exc:
-        return f"[LOG FETCH ERROR] {exc}"
+        return (
+            f"[LOG FETCH ERROR] {exc}"
+        )
 
     collected = []
     started = time.time()
 
     try:
-        while time.time() - started < 20:
-
+        while (
+            time.time() - started
+            < 20
+        ):
             if p.stdout is None:
                 break
 
@@ -334,9 +432,10 @@ def logs(kernel, user, token):
             if line:
                 collected.append(line)
 
-                current = "".join(collected)
+                current = "".join(
+                    collected
+                )
 
-                # PUBLIC_URL milte hi foran stop
                 if re.search(
                     r"PUBLIC_URL\s*:\s*https?://[^\s]+",
                     current,
@@ -369,10 +468,326 @@ def logs(kernel, user, token):
             except Exception:
                 pass
 
-    return "".join(collected)[-30000:]
+    return "".join(
+        collected
+    )[-30000:]
 
 
-def find_kernel(user, token, slug):
+# ============================================================
+# KAGGLE INTERNAL API
+# Used only for finding/canceling active session.
+# ============================================================
+
+def _kaggle_internal_post(
+    token,
+    method,
+    payload,
+):
+    try:
+        session = requests.Session()
+
+        session.headers.update(
+            {
+                "Authorization": (
+                    f"Bearer {token}"
+                ),
+                "Content-Type": (
+                    "application/json"
+                ),
+                "User-Agent": (
+                    "ZAIKO-AI-STUDIO"
+                ),
+            }
+        )
+
+        try:
+            session.get(
+                "https://www.kaggle.com/",
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+        xsrf = (
+            session.cookies.get(
+                "XSRF-TOKEN"
+            )
+            or session.cookies.get(
+                "CSRF-TOKEN"
+            )
+        )
+
+        headers = {}
+
+        if xsrf:
+            headers[
+                "X-XSRF-TOKEN"
+            ] = xsrf
+
+        response = session.post(
+            (
+                "https://www.kaggle.com/"
+                f"api/i/{method}"
+            ),
+            json=payload,
+            headers=headers,
+            timeout=20,
+        )
+
+        return (
+            response.status_code,
+            response.text or "",
+        )
+
+    except Exception as exc:
+        return (
+            0,
+            str(exc),
+        )
+
+
+def get_kaggle_session_id(
+    username,
+    token,
+    kernel_slug,
+):
+    code, body = (
+        _kaggle_internal_post(
+            token,
+            (
+                "kernels."
+                "LegacyKernelsService/"
+                "GetKernelViewModel"
+            ),
+            {
+                "authorUserName": username,
+                "kernelSlug": kernel_slug,
+                "tab": "output",
+            },
+        )
+    )
+
+    if code != 200:
+        return None
+
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+
+    kernel = (
+        data.get("kernel")
+        or {}
+    )
+
+    kernel_id = kernel.get("id")
+
+    if not kernel_id:
+        return None
+
+    code, body = (
+        _kaggle_internal_post(
+            token,
+            (
+                "kernels."
+                "KernelsService/"
+                "ListKernelVersions"
+            ),
+            {
+                "kernelId": kernel_id,
+                "sortOption": "VERSION_ID",
+                "pageSize": 30,
+            },
+        )
+    )
+
+    if code != 200:
+        return None
+
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+
+    items = (
+        data.get("items")
+        or []
+    )
+
+    # Prefer an actually active run.
+    for item in items:
+        run = item.get("run") or {}
+
+        session_id = run.get("id")
+        run_status = str(
+            run.get("status", "")
+        ).lower()
+
+        if (
+            session_id
+            and any(
+                x in run_status
+                for x in (
+                    "running",
+                    "queued",
+                    "pending",
+                )
+            )
+        ):
+            return str(session_id)
+
+    # Fallback to newest version/run.
+    for item in items:
+        run = item.get("run") or {}
+        session_id = run.get("id")
+
+        if session_id:
+            return str(session_id)
+
+    return None
+
+
+def stop_kaggle_session(
+    username,
+    token,
+    kernel_slug,
+):
+    session_id = (
+        get_kaggle_session_id(
+            username,
+            token,
+            kernel_slug,
+        )
+    )
+
+    if not session_id:
+        return (
+            False,
+            "Active Kaggle session ID could not be found.",
+        )
+
+    # --------------------------------------------------------
+    # First: try CLI command if installed/supported.
+    # --------------------------------------------------------
+
+    code, out = run_kaggle(
+        [
+            "kernels",
+            "cancel",
+            "--session-id",
+            session_id,
+        ],
+        username,
+        token,
+        30,
+    )
+
+    if code == 0:
+        return True, out
+
+    # --------------------------------------------------------
+    # Fallback: Kaggle internal API.
+    # --------------------------------------------------------
+
+    status_code, body = (
+        _kaggle_internal_post(
+            token,
+            (
+                "kernels."
+                "KernelsService/"
+                "CancelKernelSession"
+            ),
+            {
+                "sessionId": session_id
+            },
+        )
+    )
+
+    if status_code in (
+        200,
+        201,
+        202,
+        204,
+    ):
+        return True, body
+
+    return (
+        False,
+        body
+        or out
+        or "Unable to cancel Kaggle session.",
+    )
+
+
+# ============================================================
+# READY TIMER MARKER
+# Stored in existing last_logs field.
+# User never sees it.
+# ============================================================
+
+def make_ready_marker(timestamp):
+    return (
+        f"{READY_MARKER}"
+        f"{timestamp:.6f}"
+    )
+
+
+def extract_ready_timestamp(dep):
+    if not dep:
+        return None
+
+    text = getattr(
+        dep,
+        "last_logs",
+        None,
+    ) or ""
+
+    match = re.search(
+        re.escape(READY_MARKER)
+        + r"\s*([0-9]+(?:\.[0-9]+)?)",
+        text,
+    )
+
+    if not match:
+        return None
+
+    try:
+        return float(
+            match.group(1)
+        )
+    except Exception:
+        return None
+
+
+def deployment_seconds_left(dep):
+    ready_at = (
+        extract_ready_timestamp(dep)
+    )
+
+    if ready_at is None:
+        return None
+
+    return max(
+        0,
+        int(
+            F5_SESSION_SECONDS
+            - (
+                time.time()
+                - ready_at
+            )
+        ),
+    )
+
+
+# ============================================================
+# FIND KERNEL
+# ============================================================
+
+def find_kernel(
+    user,
+    token,
+    slug,
+):
     code, out = run_kaggle(
         [
             "kernels",
@@ -397,12 +812,23 @@ def find_kernel(user, token, slug):
             )
 
             if m:
-                return f"{user}/{m.group(1)}"
+                return (
+                    f"{user}/{m.group(1)}"
+                )
 
     return None
 
 
-def build_kernel(folder, token, domain, voices):
+# ============================================================
+# BUILD KAGGLE KERNEL
+# ============================================================
+
+def build_kernel(
+    folder,
+    token,
+    domain,
+    voices,
+):
     bundle = []
 
     for row in voices:
@@ -428,54 +854,122 @@ def build_kernel(folder, token, domain, voices):
         'import requests',
 
         'print("[BOOT] Installing F5-TTS and ngrok")',
+
         'subprocess.run(["pip","install","-q","f5-tts","pyngrok"],check=True)',
 
         'from pyngrok import ngrok',
 
         'PORT=7860',
+
         'NGROK_AUTH_TOKEN=__TOKEN__',
+
         'NGROK_DOMAIN=__DOMAIN__',
+
         'VOICE_BUNDLE=__VOICES__',
+
         'voice_dir=Path("saved_voices"); voice_dir.mkdir(exist_ok=True)',
+
         'for item in VOICE_BUNDLE:',
+
         '    try: (voice_dir/item["filename"]).write_bytes(base64.b64decode(item["data"])); print("[VOICE] Restored:",item["name"])',
+
         '    except Exception as e: print("[VOICE] Restore failed:",e)',
+
         'print("[BOOT] Kaggle kernel started"); subprocess.run(["nvidia-smi"],check=False)',
+
         'log=Path("f5tts.log"); handle=open(log,"a",buffering=1)',
+
         'proc=subprocess.Popen(["f5-tts_infer-gradio","--host","0.0.0.0","--port",str(PORT)],stdout=handle,stderr=subprocess.STDOUT,text=True)',
+
         'def relay():',
+
         '    pos=0',
+
         '    while proc.poll() is None:',
+
         '        try:',
+
         '            if log.exists():',
+
         '                with open(log,"r",encoding="utf-8",errors="replace") as f: f.seek(pos); chunk=f.read(); pos=f.tell()',
+
         '                for line in chunk.splitlines(): print("[F5]",line)',
+
         '        except Exception: pass',
+
         '        time.sleep(2)',
+
         'threading.Thread(target=relay,daemon=True).start()',
+
         'deadline=time.time()+900',
+
         'while time.time()<deadline:',
+
         '    if proc.poll() is not None: raise RuntimeError("F5-TTS exited with code %s"%proc.returncode)',
+
         '    try:',
+
         '        with socket.create_connection(("127.0.0.1",PORT),timeout=2): print("[F5] Gradio socket ready"); break',
+
         '    except OSError: time.sleep(3)',
+
         'else: raise TimeoutError("F5-TTS did not start within 15 minutes")',
+
         'print("[NGROK] Connecting static domain"); ngrok.set_auth_token(NGROK_AUTH_TOKEN)',
+
         'tunnel=ngrok.connect(addr=PORT,proto="http",domain=NGROK_DOMAIN); public_url=tunnel.public_url',
+
         'print("[NGROK] Public URL:",public_url)',
+
         'deadline=time.time()+180',
+
         'while time.time()<deadline:',
+
         '    try:',
+
         '        r=requests.get(public_url,timeout=10)',
+
         '        if r.status_code==200 and "gradio" in r.text.lower(): print("F5-TTS NODE ONLINE"); print("PUBLIC_URL:",public_url); break',
+
         '    except Exception as e: print("[HEALTH] Waiting:", e)',
+
         '    time.sleep(5)',
+
         'else: raise RuntimeError("ngrok domain failed Gradio health check")',
-        'while proc.poll() is None: time.sleep(10)',
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # 20 MINUTES STARTS AFTER PUBLIC_URL IS READY.
+        # ----------------------------------------------------
+
+        'print("[SESSION] F5-TTS READY. 20-minute session timer started.")',
+
+        'session_deadline=time.time()+1200',
+
+        'while proc.poll() is None and time.time()<session_deadline: time.sleep(10)',
+
+        'if proc.poll() is None:',
+
+        '    print("[SESSION] 20-minute session limit reached. Stopping F5-TTS.")',
+
+        '    try: proc.terminate()',
+
+        '    except Exception: pass',
+
+        '    try: proc.wait(timeout=15)',
+
+        '    except Exception:',
+
+        '        try: proc.kill()',
+
+        '        except Exception: pass',
+
         'print("[F5] Process exited:",proc.returncode)',
     ]
 
-    code = "\n".join(code_lines)
+    code = "\n".join(
+        code_lines
+    )
 
     code = code.replace(
         "__TOKEN__",
@@ -492,7 +986,9 @@ def build_kernel(folder, token, domain, voices):
         repr(bundle),
     )
 
-    (folder / "main.py").write_text(
+    (
+        folder / "main.py"
+    ).write_text(
         code,
         encoding="utf-8",
     )
@@ -509,7 +1005,10 @@ def build_kernel(folder, token, domain, voices):
         "machine_shape": "NvidiaTeslaT4",
     }
 
-    (folder / "kernel-metadata.json").write_text(
+    (
+        folder
+        / "kernel-metadata.json"
+    ).write_text(
         json.dumps(
             metadata,
             indent=2,
@@ -518,16 +1017,48 @@ def build_kernel(folder, token, domain, voices):
     )
 
 
+# ============================================================
+# DEPLOY
+# ============================================================
+
 def deploy(user):
-    c = get_credentials(user.id)
+    # Server-side protection.
+    existing = get_deployment(
+        user.id
+    )
+
+    if (
+        existing
+        and existing.status
+        in ACTIVE_DEPLOYMENT_STATES
+    ):
+        st.info(
+            "An F5-TTS session is already active."
+        )
+        return False
+
+    c = get_credentials(
+        user.id
+    )
 
     if not c:
-        st.error("Save Settings first.")
-        return
+        st.error(
+            "Save Settings first."
+        )
+        return False
 
-    username = c["kaggle_username"]
-    token = c["kaggle_token"]
-    ngrok_token = c["ngrok_token"]
+    username = c[
+        "kaggle_username"
+    ]
+
+    token = c[
+        "kaggle_token"
+    ]
+
+    ngrok_token = c[
+        "ngrok_token"
+    ]
+
     domain = normalize_domain(
         c["ngrok_domain"]
     )
@@ -543,14 +1074,15 @@ def deploy(user):
         st.error(
             "Complete all Settings fields."
         )
-        return
+        return False
 
-    # -------------------------------------------------
-    # USE THE ACTUAL KAGGLE NOTEBOOK SLUG
-    # -------------------------------------------------
-    slug = "f5-tts-cloud-hub"
+    slug = (
+        "f5-tts-cloud-hub"
+    )
 
-    kernel_id = f"{username}/{slug}"
+    kernel_id = (
+        f"{username}/{slug}"
+    )
 
     with tempfile.TemporaryDirectory(
         prefix="f5tts-"
@@ -623,11 +1155,7 @@ def deploy(user):
             "Kaggle submission failed."
         )
 
-        st.code(
-            out[-12000:]
-        )
-
-        return
+        return False
 
     upsert_deployment(
         user.id,
@@ -639,26 +1167,93 @@ def deploy(user):
         last_logs=out[-30000:],
     )
 
-    st.rerun()
+    return True
 
 
 # ============================================================
-# KAGGLE LIVE MONITORING
+# REFRESH DEPLOYMENT
 # ============================================================
 
 def refresh(user):
-    dep = get_deployment(user.id)
-    c = get_credentials(user.id)
+    dep = get_deployment(
+        user.id
+    )
+
+    c = get_credentials(
+        user.id
+    )
 
     if not dep or not c:
         return dep
 
-    kaggle_user = c["kaggle_username"]
-    kaggle_token = c["kaggle_token"]
+    # --------------------------------------------------------
+    # READY SESSION:
+    # Do not stream logs again.
+    # Just maintain the persistent 20-minute session.
+    # --------------------------------------------------------
 
-    # =====================================================
-    # KAGGLE STATUS
-    # =====================================================
+    if (
+        dep.status == "READY"
+        and dep.public_url
+    ):
+        remaining = (
+            deployment_seconds_left(
+                dep
+            )
+        )
+
+        # If marker exists and timer expired,
+        # cancel the Kaggle session.
+        if (
+            remaining is not None
+            and remaining <= 0
+        ):
+            username = c[
+                "kaggle_username"
+            ]
+
+            token = c[
+                "kaggle_token"
+            ]
+
+            try:
+                stop_kaggle_session(
+                    username,
+                    token,
+                    dep.kernel_slug,
+                )
+            except Exception:
+                pass
+
+            upsert_deployment(
+                user.id,
+                kernel_id=dep.kernel_id,
+                kernel_slug=dep.kernel_slug,
+                status="IDLE",
+                public_url=None,
+                last_error=None,
+                last_logs=None,
+            )
+
+            return get_deployment(
+                user.id
+            )
+
+        # READY remains stable.
+        # No log fetch.
+        return dep
+
+    kaggle_user = c[
+        "kaggle_username"
+    ]
+
+    kaggle_token = c[
+        "kaggle_token"
+    ]
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
 
     try:
         s, stext = status(
@@ -666,14 +1261,18 @@ def refresh(user):
             kaggle_user,
             kaggle_token,
         )
+
     except Exception as exc:
         s = "UNKNOWN"
-        stext = f"[STATUS FETCH ERROR] {exc}"
+        stext = (
+            f"[STATUS FETCH ERROR] "
+            f"{exc}"
+        )
 
-    # =====================================================
-    # LIVE KAGGLE LOGS
-    # PUBLIC_URL MILTE HI LOG STREAM STOP
-    # =====================================================
+    # --------------------------------------------------------
+    # LOGS ARE INTERNAL ONLY.
+    # Never rendered to UI.
+    # --------------------------------------------------------
 
     try:
         lg = logs(
@@ -681,16 +1280,20 @@ def refresh(user):
             kaggle_user,
             kaggle_token,
         )
+
     except Exception as exc:
-        lg = f"[LOG FETCH ERROR] {exc}"
+        lg = (
+            f"[LOG FETCH ERROR] "
+            f"{exc}"
+        )
 
     combined = (
         lg + "\n" + stext
     ).strip()
 
-    # =====================================================
+    # --------------------------------------------------------
     # FIND PUBLIC URL
-    # =====================================================
+    # --------------------------------------------------------
 
     url = dep.public_url
 
@@ -705,9 +1308,9 @@ def refresh(user):
             ").,;\"'"
         )
 
-    # =====================================================
-    # FALLBACK: FIND NGROK URL
-    # =====================================================
+    # --------------------------------------------------------
+    # FALLBACK NGROK URL
+    # --------------------------------------------------------
 
     if not url:
         ngrok_matches = re.findall(
@@ -721,13 +1324,9 @@ def refresh(user):
                 ").,;\"'"
             )
 
-    # =====================================================
-    # PUBLIC_URL = READY
-    #
-    # NO requests.get()
-    # NO GRADIO HEALTH CHECK
-    # NO NGROK HEALTH CHECK
-    # =====================================================
+    # --------------------------------------------------------
+    # DETERMINE STATE
+    # --------------------------------------------------------
 
     if url:
         final = "READY"
@@ -747,9 +1346,46 @@ def refresh(user):
     else:
         final = s
 
-    # =====================================================
-    # SAVE DEPLOYMENT STATE
-    # =====================================================
+    # --------------------------------------------------------
+    # READY TIMESTAMP
+    # Only create it when first becoming READY.
+    # --------------------------------------------------------
+
+    if (
+        final == "READY"
+        and url
+    ):
+        ready_at = (
+            extract_ready_timestamp(
+                dep
+            )
+        )
+
+        if ready_at is None:
+            ready_at = time.time()
+
+        stored_logs = (
+            f"{make_ready_marker(ready_at)}\n"
+            f"{combined[-29900:]}"
+        )
+
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="READY",
+            public_url=url,
+            last_error=None,
+            last_logs=stored_logs[-30000:],
+        )
+
+        return get_deployment(
+            user.id
+        )
+
+    # --------------------------------------------------------
+    # NON-READY STATE
+    # --------------------------------------------------------
 
     upsert_deployment(
         user.id,
@@ -765,7 +1401,9 @@ def refresh(user):
         last_logs=combined[-30000:],
     )
 
-    return get_deployment(user.id)
+    return get_deployment(
+        user.id
+    )
 
 
 # ============================================================
@@ -783,7 +1421,9 @@ def _get_admin_secret(
         )
 
         if value:
-            return str(value).strip()
+            return str(
+                value
+            ).strip()
 
     except Exception:
         pass
@@ -806,7 +1446,9 @@ ADMIN_SESSION_SECRET = _get_admin_secret(
     "ADMIN_SESSION_SECRET"
 )
 
-WHATSAPP_NUMBER = "923097647772"
+WHATSAPP_NUMBER = (
+    "923097647772"
+)
 
 WHATSAPP_MESSAGE = (
     "Assalam-o-Alaikum, I would like to get assistance regarding "
@@ -860,14 +1502,18 @@ def is_admin():
 
         if not cookie_value:
             try:
-                all_cookies = cookies.get_all()
+                all_cookies = (
+                    cookies.get_all()
+                )
 
                 if isinstance(
                     all_cookies,
                     dict,
                 ):
-                    cookie_value = all_cookies.get(
-                        "f5tts_admin"
+                    cookie_value = (
+                        all_cookies.get(
+                            "f5tts_admin"
+                        )
                     )
 
             except Exception:
@@ -909,7 +1555,8 @@ def admin_login():
                 cookie_value,
                 expires_at=(
                     time.time()
-                    + SESSION_DAYS * 86400
+                    + SESSION_DAYS
+                    * 86400
                 ),
             )
 
@@ -936,6 +1583,10 @@ def admin_logout():
 
     st.rerun()
 
+
+# ============================================================
+# BRANDING
+# ============================================================
 
 def branding_css():
     st.markdown(
@@ -998,6 +1649,22 @@ def branding_css():
             font-weight:800;
             color:#35a7ff;
         }
+
+        .f5-ready {
+            padding:14px 16px;
+            border:1px solid #123c24;
+            border-radius:12px;
+            background:#06150c;
+            margin-bottom:12px;
+        }
+
+        .f5-progress {
+            padding:16px;
+            border:1px solid #182234;
+            border-radius:12px;
+            background:#070b12;
+            margin:12px 0;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1032,6 +1699,10 @@ def brand_header():
     )
 
 
+# ============================================================
+# CLIENT ACCESS
+# ============================================================
+
 def client_access_seconds(user):
     from datetime import datetime, timezone
 
@@ -1043,7 +1714,9 @@ def client_access_seconds(user):
         int(
             (
                 user.access_expires_at
-                - datetime.now(timezone.utc)
+                - datetime.now(
+                    timezone.utc
+                )
             ).total_seconds()
         ),
     )
@@ -1073,6 +1746,10 @@ def format_countdown(seconds):
     )
 
 
+# ============================================================
+# LOGIN
+# ============================================================
+
 def client_login_page():
     brand_header()
 
@@ -1095,20 +1772,26 @@ def client_login_page():
             autocomplete="current-password",
         )
 
-        submitted = st.form_submit_button(
-            "Sign in",
-            type="primary",
-            use_container_width=True,
+        submitted = (
+            st.form_submit_button(
+                "Sign in",
+                type="primary",
+                use_container_width=True,
+            )
         )
 
     if submitted:
-        username_clean = username.strip()
+        username_clean = (
+            username.strip()
+        )
 
         if (
             ADMIN_USERNAME
             and ADMIN_PASSWORD
-            and username_clean == ADMIN_USERNAME
-            and password == ADMIN_PASSWORD
+            and username_clean
+            == ADMIN_USERNAME
+            and password
+            == ADMIN_PASSWORD
         ):
             admin_login()
             st.rerun()
@@ -1140,9 +1823,11 @@ def client_login_page():
             return
 
         try:
-            raw_session = create_session(
-                user.id,
-                SESSION_DAYS,
+            raw_session = (
+                create_session(
+                    user.id,
+                    SESSION_DAYS,
+                )
             )
 
             if not raw_session:
@@ -1199,6 +1884,10 @@ def client_login_page():
 
     footer()
 
+
+# ============================================================
+# ADMIN DASHBOARD
+# ============================================================
 
 def admin_dashboard():
     stats = admin_stats()
@@ -1482,10 +2171,12 @@ def create_new_client():
             value=7,
         )
 
-        submitted = st.form_submit_button(
-            "Save Changes / Create Client",
-            type="primary",
-            use_container_width=True,
+        submitted = (
+            st.form_submit_button(
+                "Save Changes / Create Client",
+                type="primary",
+                use_container_width=True,
+            )
         )
 
     if submitted:
@@ -1511,7 +2202,7 @@ def create_new_client():
 
 
 # ============================================================
-# ADMIN PANEL WITH PAGE PERSISTENCE
+# ADMIN PANEL
 # ============================================================
 
 def admin_panel():
@@ -1524,13 +2215,20 @@ def admin_panel():
         "Create New Client",
     ]
 
-    saved_admin_page = page_cookie_get(
-        "f5tts_admin_page",
-        "Dashboard",
+    saved_admin_page = (
+        page_cookie_get(
+            "f5tts_admin_page",
+            "Dashboard",
+        )
     )
 
-    if saved_admin_page not in admin_pages:
-        saved_admin_page = "Dashboard"
+    if (
+        saved_admin_page
+        not in admin_pages
+    ):
+        saved_admin_page = (
+            "Dashboard"
+        )
 
     with st.sidebar:
         st.markdown(
@@ -1574,13 +2272,19 @@ def admin_panel():
     footer()
 
 
+# ============================================================
+# CLIENT SETTINGS
+# ============================================================
+
 def client_settings(user):
     st.title(
         "Settings"
     )
 
     creds = (
-        get_credentials(user.id)
+        get_credentials(
+            user.id
+        )
         or {}
     )
 
@@ -1628,7 +2332,9 @@ def client_settings(user):
         )
 
     if ok:
-        nd = normalize_domain(nd)
+        nd = normalize_domain(
+            nd
+        )
 
         if not all(
             (
@@ -1728,6 +2434,10 @@ def client_settings(user):
             st.rerun()
 
 
+# ============================================================
+# CLIENT DASHBOARD
+# ============================================================
+
 def client_dashboard(user):
     st.title(
         f"Welcome, {user.username} 👋"
@@ -1737,191 +2447,312 @@ def client_dashboard(user):
         "Your ZAIKO AI STUDIO dashboard"
     )
 
-    if hasattr(
-        st,
-        "fragment",
-    ):
+    # ========================================================
+    # PLAN COUNTDOWN
+    # Browser-side only.
+    # No Streamlit reruns every second.
+    # ========================================================
 
-        @st.fragment(
-            run_every="1s"
+    seconds = client_access_seconds(
+        user
+    )
+
+    expiry_text = (
+        user.access_expires_at.strftime(
+            "%d %b %Y, %I:%M:%S %p UTC"
         )
-        def countdown_fragment():
-            st.subheader(
-                "Your Plan"
-            )
+        if user.access_expires_at
+        else "No expiry"
+    )
 
-            seconds = (
-                client_access_seconds(
-                    user
-                )
-            )
+    st.subheader(
+        "Your Plan"
+    )
 
-            if seconds <= 0:
-                st.error(
-                    "Your access has expired. "
-                    "Please contact the administrator."
-                )
-
-            else:
-                expiry = (
-                    user.access_expires_at.strftime(
-                        "%d %b %Y, %I:%M:%S %p UTC"
-                    )
-                )
-
-                st.write(
-                    f"Access expires: **{expiry}**"
-                )
-
-                st.markdown(
-                    f'<div class="countdown">'
-                    f"{format_countdown(seconds)}"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-        countdown_fragment()
+    if seconds <= 0:
+        st.error(
+            "Your access has expired. "
+            "Please contact the administrator."
+        )
 
     else:
-        seconds = (
-            client_access_seconds(
-                user
-            )
-        )
-
-        st.subheader(
-            "Your Plan"
-        )
-
         st.write(
-            "Access expires: **"
-            f"{user.access_expires_at.strftime('%d %b %Y, %I:%M:%S %p UTC')}"
-            "**"
+            f"Access expires: **{expiry_text}**"
+        )
+
+        countdown_id = (
+            "plan-countdown"
         )
 
         st.markdown(
-            f'<div class="countdown">'
-            f"{format_countdown(seconds)}"
-            f"</div>",
+            f"""
+            <div
+                id="{countdown_id}"
+                class="countdown"
+            >
+                {format_countdown(seconds)}
+            </div>
+
+            <script>
+            (function() {{
+                let remaining = {seconds};
+
+                function updatePlanCountdown() {{
+                    const el =
+                        document.getElementById(
+                            "{countdown_id}"
+                        );
+
+                    if (!el) return;
+
+                    if (remaining <= 0) {{
+                        el.innerText =
+                            "0 days 00 hours 00 minutes 00 seconds";
+                        return;
+                    }}
+
+                    const days =
+                        Math.floor(
+                            remaining / 86400
+                        );
+
+                    let rem =
+                        remaining % 86400;
+
+                    const hours =
+                        Math.floor(
+                            rem / 3600
+                        );
+
+                    rem %= 3600;
+
+                    const minutes =
+                        Math.floor(
+                            rem / 60
+                        );
+
+                    const seconds =
+                        rem % 60;
+
+                    el.innerText =
+                        days + " days "
+                        + String(hours).padStart(2, "0")
+                        + " hours "
+                        + String(minutes).padStart(2, "0")
+                        + " minutes "
+                        + String(seconds).padStart(2, "0")
+                        + " seconds";
+
+                    remaining--;
+                }}
+
+                updatePlanCountdown();
+
+                setInterval(
+                    updatePlanCountdown,
+                    1000
+                );
+            }})();
+            </script>
+            """,
             unsafe_allow_html=True,
         )
 
     st.divider()
 
-    if st.button(
+    # ========================================================
+    # GET CURRENT DEPLOYMENT
+    # ========================================================
+
+    dep = get_deployment(
+        user.id
+    )
+
+    # ========================================================
+    # IMPORTANT:
+    # Refresh only when we actually need deployment monitoring.
+    # READY does NOT call refresh repeatedly.
+    # ========================================================
+
+    if (
+        dep
+        and dep.status
+        in {
+            "SUBMITTING",
+            "QUEUED",
+            "RUNNING",
+        }
+    ):
+        active_session = True
+
+    elif (
+        dep
+        and dep.status == "READY"
+        and dep.public_url
+    ):
+        active_session = True
+
+    else:
+        active_session = False
+
+    # ========================================================
+    # DEPLOY BUTTON
+    # ========================================================
+
+    deploy_clicked = st.button(
         "🚀 Deploy / Restart F5-TTS",
         type="primary",
         use_container_width=True,
-    ):
-        deploy(user)
+        disabled=active_session,
+    )
+
+    if deploy_clicked:
+        with st.spinner(
+            "Starting F5-TTS on Kaggle..."
+        ):
+            ok = deploy(user)
+
+        if ok:
+            st.rerun()
 
     # ========================================================
-    # LIVE DEPLOYMENT MONITOR
+    # READY STATE
     # ========================================================
 
-    if hasattr(
-        st,
-        "fragment",
+    if (
+        dep
+        and dep.status == "READY"
+        and dep.public_url
     ):
-
-        @st.fragment(
-            run_every=float(POLL_SECONDS)
-        )
-        def deployment_monitor():
-            dep = refresh(user)
-
-            if not dep:
-                st.info(
-                    "No F5-TTS deployment yet."
-                )
-                return
-
-            st.metric(
-                "Kaggle Session",
-                dep.status or "IDLE",
+        remaining = (
+            deployment_seconds_left(
+                dep
             )
-
-            if (
-                dep.status == "READY"
-                and dep.public_url
-            ):
-                st.success(
-                    "F5-TTS, Gradio and ngrok are live. "
-                    "Your voice generation system is ready."
-                )
-
-                st.link_button(
-                    "🎙️ Start voice generation",
-                    dep.public_url,
-                    use_container_width=True,
-                )
-
-            elif dep.status == "ERROR":
-                st.error(
-                    "Kaggle kernel reported an error."
-                )
-
-                st.code(
-                    (
-                        dep.last_error
-                        or ""
-                    )[-12000:]
-                )
-
-            elif dep.status == "RUNNING":
-                st.info(
-                    "Kaggle GPU is running. "
-                    "Checking F5-TTS → Gradio → ngrok..."
-                )
-
-            elif dep.status == "QUEUED":
-                st.info(
-                    "Kaggle GPU is queued. "
-                    "Waiting for the F5-TTS server..."
-                )
-
-            else:
-                st.info(
-                    "Waiting for GPU → F5-TTS → "
-                    "Gradio → ngrok health checks."
-                )
-
-            st.subheader(
-                "Kaggle Logs"
-            )
-
-            st.code(
-                (
-                    dep.last_logs
-                    or "Waiting for live Kaggle logs..."
-                )[-30000:],
-                language="text",
-            )
-
-        deployment_monitor()
-
-    else:
-        dep = refresh(user)
-
-        if not dep:
-            st.info(
-                "No F5-TTS deployment yet."
-            )
-            return
-
-        st.metric(
-            "Kaggle Session",
-            dep.status or "IDLE",
         )
 
         if (
-            dep.status == "READY"
+            remaining is not None
+            and remaining <= 0
+        ):
+            dep = refresh(user)
+            remaining = (
+                deployment_seconds_left(
+                    dep
+                )
+            )
+
+        if (
+            dep
+            and dep.status == "READY"
             and dep.public_url
         ):
-            st.success(
-                "F5-TTS, Gradio and ngrok are live. "
-                "Your voice generation system is ready."
+            st.markdown(
+                '<div class="f5-ready">'
+                '<b>F5-TTS is ready.</b><br>'
+                "Your voice generation system is live."
+                "</div>",
+                unsafe_allow_html=True,
             )
+
+            # ------------------------------------------------
+            # 20-MINUTE SESSION COUNTDOWN
+            # Browser-side only.
+            # ------------------------------------------------
+
+            timer_seconds = (
+                remaining
+                if remaining is not None
+                else F5_SESSION_SECONDS
+            )
+
+            st.markdown(
+                f"""
+                <div style="
+                    padding:10px 0;
+                    color:#8ea8c7;
+                ">
+                    Session time remaining:
+                    <span
+                        id="f5-session-countdown"
+                        style="
+                            color:#35a7ff;
+                            font-weight:800;
+                        "
+                    >
+                        {format_countdown(timer_seconds)}
+                    </span>
+                </div>
+
+                <script>
+                (function() {{
+                    let remaining =
+                        {timer_seconds};
+
+                    function updateF5Timer() {{
+                        const el =
+                            document.getElementById(
+                                "f5-session-countdown"
+                            );
+
+                        if (!el) return;
+
+                        if (remaining <= 0) {{
+                            el.innerText =
+                                "Session ending...";
+                            return;
+                        }}
+
+                        const days =
+                            Math.floor(
+                                remaining / 86400
+                            );
+
+                        let rem =
+                            remaining % 86400;
+
+                        const hours =
+                            Math.floor(
+                                rem / 3600
+                            );
+
+                        rem %= 3600;
+
+                        const minutes =
+                            Math.floor(
+                                rem / 60
+                            );
+
+                        const seconds =
+                            rem % 60;
+
+                        el.innerText =
+                            days + " days "
+                            + String(hours).padStart(2, "0")
+                            + " hours "
+                            + String(minutes).padStart(2, "0")
+                            + " minutes "
+                            + String(seconds).padStart(2, "0")
+                            + " seconds";
+
+                        remaining--;
+                    }}
+
+                    updateF5Timer();
+
+                    setInterval(
+                        updateF5Timer,
+                        1000
+                    );
+                }})();
+                </script>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # ------------------------------------------------
+            # START VOICE GENERATION
+            # EXACT LABEL PRESERVED
+            # ------------------------------------------------
 
             st.link_button(
                 "🎙️ Start voice generation",
@@ -1929,51 +2760,242 @@ def client_dashboard(user):
                 use_container_width=True,
             )
 
-        elif dep.status == "ERROR":
-            st.error(
-                "Kaggle kernel reported an error."
-            )
+            st.divider()
 
-            st.code(
-                (
-                    dep.last_error
-                    or ""
-                )[-12000:]
-            )
+            # ------------------------------------------------
+            # STOP BUTTON
+            # ------------------------------------------------
 
-        elif dep.status == "RUNNING":
-            st.info(
-                "Kaggle GPU is running. "
-                "Checking F5-TTS → Gradio → ngrok..."
-            )
+            if st.button(
+                "⏹ Stop F5-TTS session",
+                use_container_width=True,
+            ):
+                creds = get_credentials(
+                    user.id
+                )
 
-        elif dep.status == "QUEUED":
-            st.info(
-                "Kaggle GPU is queued. "
-                "Waiting for the F5-TTS server..."
+                if not creds:
+                    st.error(
+                        "Kaggle settings are missing."
+                    )
+
+                else:
+                    with st.spinner(
+                        "Stopping F5-TTS GPU session..."
+                    ):
+                        ok, message = (
+                            stop_kaggle_session(
+                                creds[
+                                    "kaggle_username"
+                                ],
+                                creds[
+                                    "kaggle_token"
+                                ],
+                                dep.kernel_slug,
+                            )
+                        )
+
+                    if ok:
+                        upsert_deployment(
+                            user.id,
+                            kernel_id=dep.kernel_id,
+                            kernel_slug=dep.kernel_slug,
+                            status="IDLE",
+                            public_url=None,
+                            last_error=None,
+                            last_logs=None,
+                        )
+
+                        st.success(
+                            "F5-TTS session stopped. "
+                            "GPU session has been released."
+                        )
+
+                        time.sleep(0.5)
+
+                        st.rerun()
+
+                    else:
+                        st.error(
+                            "Unable to stop the Kaggle session."
+                        )
+
+                        # Do NOT show Kaggle logs.
+                        st.caption(
+                            "Kaggle did not accept the session-stop request."
+                        )
+
+            # ------------------------------------------------
+            # CRITICAL:
+            # NO deployment_monitor here.
+            # READY PAGE IS STABLE.
+            # ------------------------------------------------
+
+            return
+
+    # ========================================================
+    # NO ACTIVE DEPLOYMENT
+    # ========================================================
+
+    if not dep:
+        st.info(
+            "No F5-TTS deployment yet."
+        )
+        return
+
+    # ========================================================
+    # ERROR
+    # ========================================================
+
+    if dep.status == "ERROR":
+        st.error(
+            "Kaggle kernel reported an error. "
+            "You can deploy again."
+        )
+        return
+
+    # ========================================================
+    # COMPLETE
+    # ========================================================
+
+    if dep.status == "COMPLETE":
+        st.info(
+            "The previous F5-TTS session has ended. "
+            "Deploy again to start a new session."
+        )
+        return
+
+    # ========================================================
+    # ACTIVE MONITOR
+    #
+    # Logs are NOT rendered.
+    # Only progress/status is shown.
+    # When PUBLIC_URL appears, full app reruns once.
+    # Then this fragment disappears because state is READY.
+    # ========================================================
+
+    if (
+        dep.status
+        in {
+            "SUBMITTING",
+            "QUEUED",
+            "RUNNING",
+        }
+    ):
+
+        if hasattr(
+            st,
+            "fragment",
+        ):
+
+            @st.fragment(
+                run_every=float(
+                    POLL_SECONDS
+                )
             )
+            def deployment_monitor():
+                with st.spinner(
+                    "Checking F5-TTS deployment..."
+                ):
+                    current = refresh(
+                        user
+                    )
+
+                if not current:
+                    st.info(
+                        "Waiting for F5-TTS deployment..."
+                    )
+                    return
+
+                if (
+                    current.status
+                    == "READY"
+                    and current.public_url
+                ):
+                    # PUBLIC_URL detected.
+                    # Stop this monitoring fragment
+                    # and perform one clean full rerun.
+                    st.rerun()
+
+                elif current.status == "ERROR":
+                    st.error(
+                        "Kaggle kernel reported an error."
+                    )
+
+                elif current.status == "RUNNING":
+                    st.info(
+                        "Kaggle GPU is running. "
+                        "F5-TTS is starting..."
+                    )
+
+                elif current.status == "QUEUED":
+                    st.info(
+                        "Kaggle GPU is queued. "
+                        "Waiting for F5-TTS..."
+                    )
+
+                elif current.status == "SUBMITTING":
+                    st.info(
+                        "Submitting F5-TTS to Kaggle..."
+                    )
+
+                else:
+                    st.info(
+                        "Starting F5-TTS..."
+                    )
+
+            deployment_monitor()
 
         else:
-            st.info(
-                "Waiting for GPU → F5-TTS → "
-                "Gradio → ngrok health checks."
-            )
+            with st.spinner(
+                "Checking F5-TTS deployment..."
+            ):
+                dep = refresh(
+                    user
+                )
 
-        st.subheader(
-            "Kaggle Logs"
-        )
+            if (
+                dep
+                and dep.status == "READY"
+                and dep.public_url
+            ):
+                st.rerun()
 
-        st.code(
-            (
-                dep.last_logs
-                or "Waiting for live Kaggle logs..."
-            )[-30000:],
-            language="text",
-        )
+            elif dep and dep.status == "ERROR":
+                st.error(
+                    "Kaggle kernel reported an error."
+                )
+
+            elif dep and dep.status == "RUNNING":
+                st.info(
+                    "Kaggle GPU is running. "
+                    "F5-TTS is starting..."
+                )
+
+            elif dep and dep.status == "QUEUED":
+                st.info(
+                    "Kaggle GPU is queued. "
+                    "Waiting for F5-TTS..."
+                )
+
+            else:
+                st.info(
+                    "Starting F5-TTS..."
+                )
+
+        return
+
+    # ========================================================
+    # IDLE / UNKNOWN
+    # ========================================================
+
+    st.info(
+        "No active F5-TTS session."
+    )
 
 
 # ============================================================
-# CLIENT PANEL WITH PAGE PERSISTENCE
+# CLIENT PANEL
 # ============================================================
 
 def client_panel(user):
@@ -1986,13 +3008,20 @@ def client_panel(user):
         "Settings",
     ]
 
-    saved_client_page = page_cookie_get(
-        "f5tts_client_page",
-        "Dashboard",
+    saved_client_page = (
+        page_cookie_get(
+            "f5tts_client_page",
+            "Dashboard",
+        )
     )
 
-    if saved_client_page not in client_pages:
-        saved_client_page = "Dashboard"
+    if (
+        saved_client_page
+        not in client_pages
+    ):
+        saved_client_page = (
+            "Dashboard"
+        )
 
     with st.sidebar:
         st.markdown(
@@ -2022,13 +3051,21 @@ def client_panel(user):
             logout()
 
     if page == "Dashboard":
-        client_dashboard(user)
+        client_dashboard(
+            user
+        )
 
     else:
-        client_settings(user)
+        client_settings(
+            user
+        )
 
     footer()
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
     branding_css()
@@ -2064,18 +3101,24 @@ def main():
                 and not client_cookie
             ):
                 try:
-                    all_cookies = cookies.get_all()
+                    all_cookies = (
+                        cookies.get_all()
+                    )
 
                     if isinstance(
                         all_cookies,
                         dict,
                     ):
-                        admin_cookie = all_cookies.get(
-                            "f5tts_admin"
+                        admin_cookie = (
+                            all_cookies.get(
+                                "f5tts_admin"
+                            )
                         )
 
-                        client_cookie = all_cookies.get(
-                            "f5tts_session"
+                        client_cookie = (
+                            all_cookies.get(
+                                "f5tts_session"
+                            )
                         )
 
                 except Exception:
@@ -2108,20 +3151,24 @@ def main():
     # CLIENT AUTHENTICATION
     # ========================================================
 
-    user = st.session_state.get(
-        "client_authenticated_user"
+    user = (
+        st.session_state.get(
+            "client_authenticated_user"
+        )
     )
 
     # ========================================================
-    # RESTORE CLIENT FROM PERSISTENT COOKIE
+    # RESTORE CLIENT FROM COOKIE
     # ========================================================
 
     if user is None:
         raw_cookie = cookie_get()
 
         if raw_cookie:
-            user = get_user_by_session(
-                raw_cookie
+            user = (
+                get_user_by_session(
+                    raw_cookie
+                )
             )
 
             if user:
@@ -2156,7 +3203,9 @@ def main():
         or (
             user.access_expires_at
             and user.access_expires_at
-            <= datetime.now(timezone.utc)
+            <= datetime.now(
+                timezone.utc
+            )
         )
     ):
         st.session_state.pop(
@@ -2195,8 +3244,14 @@ def main():
         "user_id"
     ] = user.id
 
-    client_panel(user)
+    client_panel(
+        user
+    )
 
+
+# ============================================================
+# APP START
+# ============================================================
 
 try:
     main()
