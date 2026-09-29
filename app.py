@@ -7,6 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+from datetime import datetime, timedelta, timezone
 
 import requests
 import streamlit as st
@@ -149,9 +150,10 @@ def cookie_set(v):
             "f5tts_session",
             v,
             expires_at=(
-                time.time()
-                + SESSION_DAYS * 86400
+                datetime.now(timezone.utc)
+                + timedelta(days=SESSION_DAYS)
             ),
+            path="/",
         )
 
         return True
@@ -209,9 +211,10 @@ def page_cookie_set(name, value):
             name,
             value,
             expires_at=(
-                time.time()
-                + SESSION_DAYS * 86400
+                datetime.now(timezone.utc)
+                + timedelta(days=SESSION_DAYS)
             ),
+            path="/",
         )
 
     except Exception:
@@ -1297,68 +1300,39 @@ def deploy(user):
 # ============================================================
 
 def refresh(user):
-    dep = get_deployment(
-        user.id
-    )
-
-    c = get_credentials(
-        user.id
-    )
+    dep = get_deployment(user.id)
+    c = get_credentials(user.id)
 
     if not dep or not c:
         return dep
 
-    kaggle_user = c[
-        "kaggle_username"
-    ]
-
-    kaggle_token = c[
-        "kaggle_token"
-    ]
+    kaggle_user = c["kaggle_username"]
+    kaggle_token = c["kaggle_token"]
 
     # ========================================================
-    # READY STATE
-    #
-    # BEFORE:
-    # READY was returned immediately from database.
-    #
-    # NOW:
-    # We verify actual Kaggle runtime.
+    # READY / ACTIVE STATE
+    # ONLY ACTUAL RUNNING KAGGLE RUNTIME COUNTS.
     # ========================================================
 
-    if (
-        dep.status == "READY"
-        and dep.public_url
-    ):
-
-        # ----------------------------------------------------
-        # First check actual Kaggle CLI runtime.
-        # ----------------------------------------------------
+    if dep.status in ACTIVE_DEPLOYMENT_STATES:
 
         try:
-            runtime_status, runtime_text = (
-                status(
-                    dep.kernel_id,
-                    kaggle_user,
-                    kaggle_token,
-                )
+            runtime_status, runtime_text = status(
+                dep.kernel_id,
+                kaggle_user,
+                kaggle_token,
             )
-
         except Exception:
             runtime_status = "UNKNOWN"
             runtime_text = ""
 
         # ----------------------------------------------------
-        # If CLI says RUNNING, READY is valid.
+        # ACTUAL RUNNING SESSION
         # ----------------------------------------------------
 
         if runtime_status == "RUNNING":
 
-            remaining = (
-                deployment_seconds_left(
-                    dep
-                )
-            )
+            remaining = deployment_seconds_left(dep)
 
             if (
                 remaining is not None
@@ -1383,22 +1357,25 @@ def refresh(user):
                     last_logs=None,
                 )
 
-                return get_deployment(
-                    user.id
-                )
+                return get_deployment(user.id)
 
-            return dep
+            # Existing READY remains READY only when
+            # Kaggle confirms an actual RUNNING runtime.
+            if dep.status == "READY":
+                return dep
+
+            # Runtime is genuinely running but URL has not
+            # yet been detected.
+            dep_status = "RUNNING"
 
         # ----------------------------------------------------
-        # CLI explicitly says complete/stopped.
-        # Notebook still exists, but SESSION is gone.
+        # KAGGLE EXPLICITLY SAYS SESSION IS GONE
         # ----------------------------------------------------
 
-        if runtime_status in (
+        elif runtime_status in (
             "COMPLETE",
             "NOT_FOUND",
         ):
-
             upsert_deployment(
                 user.id,
                 kernel_id=dep.kernel_id,
@@ -1409,52 +1386,62 @@ def refresh(user):
                 last_logs=None,
             )
 
-            return get_deployment(
-                user.id
-            )
+            return get_deployment(user.id)
 
         # ----------------------------------------------------
-        # If CLI is uncertain, use Kaggle internal runtime
-        # API. This is specifically to distinguish:
-        #
-        # notebook exists
-        # vs
-        # notebook has an ACTIVE RUN.
+        # CLI UNKNOWN -> VERIFY ACTUAL ACTIVE RUN INTERNALLY
         # ----------------------------------------------------
 
-        try:
-            session_id, runtime_state = (
-                get_kaggle_runtime(
-                    kaggle_user,
-                    kaggle_token,
-                    dep.kernel_slug,
-                )
-            )
-
-        except Exception:
-            session_id = None
-            runtime_state = "UNKNOWN"
-
-        if runtime_state == "RUNNING":
-
-            remaining = (
-                deployment_seconds_left(
-                    dep
-                )
-            )
-
-            if (
-                remaining is not None
-                and remaining <= 0
-            ):
-                try:
-                    stop_kaggle_session(
+        else:
+            try:
+                session_id, runtime_state = (
+                    get_kaggle_runtime(
                         kaggle_user,
                         kaggle_token,
                         dep.kernel_slug,
                     )
-                except Exception:
-                    pass
+                )
+            except Exception:
+                session_id = None
+                runtime_state = "UNKNOWN"
+
+            # Actual active run confirmed.
+            if runtime_state == "RUNNING":
+
+                remaining = deployment_seconds_left(dep)
+
+                if (
+                    remaining is not None
+                    and remaining <= 0
+                ):
+                    try:
+                        stop_kaggle_session(
+                            kaggle_user,
+                            kaggle_token,
+                            dep.kernel_slug,
+                        )
+                    except Exception:
+                        pass
+
+                    upsert_deployment(
+                        user.id,
+                        kernel_id=dep.kernel_id,
+                        kernel_slug=dep.kernel_slug,
+                        status="IDLE",
+                        public_url=None,
+                        last_error=None,
+                        last_logs=None,
+                    )
+
+                    return get_deployment(user.id)
+
+                if dep.status == "READY":
+                    return dep
+
+                dep_status = "RUNNING"
+
+            # No active run.
+            elif runtime_state == "STOPPED":
 
                 upsert_deployment(
                     user.id,
@@ -1466,45 +1453,121 @@ def refresh(user):
                     last_logs=None,
                 )
 
-                return get_deployment(
-                    user.id
+                return get_deployment(user.id)
+
+            # ------------------------------------------------
+            # CRITICAL:
+            # UNKNOWN NEVER PRESERVES OLD READY STATE.
+            # Fail closed instead of showing fake LIVE.
+            # ------------------------------------------------
+
+            else:
+
+                upsert_deployment(
+                    user.id,
+                    kernel_id=dep.kernel_id,
+                    kernel_slug=dep.kernel_slug,
+                    status="IDLE",
+                    public_url=None,
+                    last_error=None,
+                    last_logs=None,
                 )
 
-            return dep
+                return get_deployment(user.id)
+
+        # ====================================================
+        # ACTIVE BUT NOT READY
+        # ====================================================
+
+        try:
+            lg = logs(
+                dep.kernel_id,
+                kaggle_user,
+                kaggle_token,
+            )
+        except Exception as exc:
+            lg = f"[LOG FETCH ERROR] {exc}"
+
+        combined = (
+            lg + "\n" + runtime_text
+        ).strip()
+
+        # IMPORTANT:
+        # Never reuse dep.public_url here.
+        # Only a freshly detected URL from the CURRENT
+        # RUNNING runtime can make the deployment READY.
+        url = None
+
+        if runtime_status == "RUNNING":
+            matches = re.findall(
+                r"PUBLIC_URL\s*:\s*(https?://[^\s]+)",
+                combined,
+                flags=re.IGNORECASE,
+            )
+
+            if matches:
+                url = matches[-1].rstrip(
+                    ").,;\"'"
+                )
+
+            if not url:
+                ngrok_matches = re.findall(
+                    r"https?://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
+                    combined,
+                    flags=re.IGNORECASE,
+                )
+
+                if ngrok_matches:
+                    url = ngrok_matches[-1].rstrip(
+                        ").,;\"'"
+                    )
 
         # ----------------------------------------------------
-        # Internal API confirms NO active run.
-        #
-        # This is the critical fix.
-        # Notebook remains on Kaggle, but Deploy becomes
-        # available because the runtime session is stopped.
+        # READY ONLY WHEN CURRENT RUNTIME IS RUNNING
+        # AND A CURRENT URL WAS DETECTED.
         # ----------------------------------------------------
 
-        if runtime_state == "STOPPED":
+        if url:
+            ready_at = extract_ready_timestamp(dep)
+
+            if ready_at is None:
+                ready_at = time.time()
+
+            stored_logs = (
+                f"{make_ready_marker(ready_at)}\n"
+                f"{combined[-29900:]}"
+            )
 
             upsert_deployment(
                 user.id,
                 kernel_id=dep.kernel_id,
                 kernel_slug=dep.kernel_slug,
-                status="IDLE",
-                public_url=None,
+                status="READY",
+                public_url=url,
                 last_error=None,
-                last_logs=None,
+                last_logs=stored_logs[-30000:],
             )
 
-            return get_deployment(
-                user.id
-            )
+            return get_deployment(user.id)
 
         # ----------------------------------------------------
-        # If both APIs are temporarily uncertain, preserve
-        # current state rather than falsely killing it.
+        # STILL RUNNING, BUT NOT READY YET
         # ----------------------------------------------------
 
-        return dep
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="RUNNING",
+            public_url=None,
+            last_error=None,
+            last_logs=combined[-30000:],
+        )
+
+        return get_deployment(user.id)
 
     # ========================================================
-    # NON-READY STATE
+    # NON-ACTIVE DATABASE STATE
     # ========================================================
 
     try:
@@ -1513,139 +1576,19 @@ def refresh(user):
             kaggle_user,
             kaggle_token,
         )
-
     except Exception as exc:
         s = "UNKNOWN"
-        stext = (
-            f"[STATUS FETCH ERROR] "
-            f"{exc}"
-        )
+        stext = f"[STATUS FETCH ERROR] {exc}"
 
-    # ========================================================
-    # LOGS INTERNAL ONLY
-    # ========================================================
+    # --------------------------------------------------------
+    # If deployment is IDLE, do not use old database URL/logs
+    # to resurrect it.
+    # --------------------------------------------------------
 
-    try:
-        lg = logs(
-            dep.kernel_id,
-            kaggle_user,
-            kaggle_token,
-        )
-
-    except Exception as exc:
-        lg = (
-            f"[LOG FETCH ERROR] "
-            f"{exc}"
-        )
-
-    combined = (
-        lg + "\n" + stext
-    ).strip()
-
-    # ========================================================
-    # PUBLIC URL
-    # ========================================================
-
-    url = dep.public_url
-
-    matches = re.findall(
-        r"PUBLIC_URL\s*:\s*(https?://[^\s]+)",
-        combined,
-        flags=re.IGNORECASE,
-    )
-
-    if matches:
-        url = matches[-1].rstrip(
-            ").,;\"'"
-        )
-
-    # ========================================================
-    # FALLBACK NGROK URL
-    # ========================================================
-
-    if not url:
-        ngrok_matches = re.findall(
-            r"https?://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
-            combined,
-            flags=re.IGNORECASE,
-        )
-
-        if ngrok_matches:
-            url = ngrok_matches[-1].rstrip(
-                ").,;\"'"
-            )
-
-    # ========================================================
-    # DETERMINE STATE
-    # ========================================================
-
-    if url:
-        final = "READY"
-
-    elif s == "ERROR":
-        final = "ERROR"
-
-    elif s == "RUNNING":
-        final = "RUNNING"
-
-    elif s == "QUEUED":
-        final = "QUEUED"
-
-    elif s == "COMPLETE":
-        final = "IDLE"
-
-    elif s == "NOT_FOUND":
-        final = "IDLE"
-
-    else:
-        final = s
-
-    # ========================================================
-    # READY TIMESTAMP
-    # ========================================================
-
-    if (
-        final == "READY"
-        and url
+    if s in (
+        "COMPLETE",
+        "NOT_FOUND",
     ):
-
-        ready_at = (
-            extract_ready_timestamp(
-                dep
-            )
-        )
-
-        if ready_at is None:
-            ready_at = time.time()
-
-        stored_logs = (
-            f"{make_ready_marker(ready_at)}\n"
-            f"{combined[-29900:]}"
-        )
-
-        upsert_deployment(
-            user.id,
-            kernel_id=dep.kernel_id,
-            kernel_slug=dep.kernel_slug,
-            status="READY",
-            public_url=url,
-            last_error=None,
-            last_logs=stored_logs[-30000:],
-        )
-
-        return get_deployment(
-            user.id
-        )
-
-    # ========================================================
-    # STOPPED / COMPLETE
-    #
-    # Notebook can remain on Kaggle.
-    # We only reset the app deployment state.
-    # ========================================================
-
-    if final == "IDLE":
-
         upsert_deployment(
             user.id,
             kernel_id=dep.kernel_id,
@@ -1656,31 +1599,168 @@ def refresh(user):
             last_logs=None,
         )
 
-        return get_deployment(
-            user.id
-        )
+        return get_deployment(user.id)
+
+    # --------------------------------------------------------
+    # UNKNOWN is NOT allowed to become READY from stale logs.
+    # --------------------------------------------------------
+
+    if s == "UNKNOWN":
+        try:
+            session_id, runtime_state = (
+                get_kaggle_runtime(
+                    kaggle_user,
+                    kaggle_token,
+                    dep.kernel_slug,
+                )
+            )
+        except Exception:
+            session_id = None
+            runtime_state = "UNKNOWN"
+
+        if runtime_state != "RUNNING":
+            upsert_deployment(
+                user.id,
+                kernel_id=dep.kernel_id,
+                kernel_slug=dep.kernel_slug,
+                status="IDLE",
+                public_url=None,
+                last_error=None,
+                last_logs=None,
+            )
+
+            return get_deployment(user.id)
+
+        s = "RUNNING"
 
     # ========================================================
-    # OTHER STATES
+    # CURRENT RUNNING RUNTIME ONLY
+    # ========================================================
+
+    if s == "RUNNING":
+
+        try:
+            lg = logs(
+                dep.kernel_id,
+                kaggle_user,
+                kaggle_token,
+            )
+        except Exception as exc:
+            lg = f"[LOG FETCH ERROR] {exc}"
+
+        combined = (
+            lg + "\n" + stext
+        ).strip()
+
+        url = None
+
+        matches = re.findall(
+            r"PUBLIC_URL\s*:\s*(https?://[^\s]+)",
+            combined,
+            flags=re.IGNORECASE,
+        )
+
+        if matches:
+            url = matches[-1].rstrip(
+                ").,;\"'"
+            )
+
+        if not url:
+            ngrok_matches = re.findall(
+                r"https?://[A-Za-z0-9._-]+\.ngrok(?:-free)?\.app",
+                combined,
+                flags=re.IGNORECASE,
+            )
+
+            if ngrok_matches:
+                url = ngrok_matches[-1].rstrip(
+                    ").,;\"'"
+                )
+
+        if url:
+            ready_at = extract_ready_timestamp(dep)
+
+            if ready_at is None:
+                ready_at = time.time()
+
+            stored_logs = (
+                f"{make_ready_marker(ready_at)}\n"
+                f"{combined[-29900:]}"
+            )
+
+            upsert_deployment(
+                user.id,
+                kernel_id=dep.kernel_id,
+                kernel_slug=dep.kernel_slug,
+                status="READY",
+                public_url=url,
+                last_error=None,
+                last_logs=stored_logs[-30000:],
+            )
+
+            return get_deployment(user.id)
+
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="RUNNING",
+            public_url=None,
+            last_error=None,
+            last_logs=combined[-30000:],
+        )
+
+        return get_deployment(user.id)
+
+    # ========================================================
+    # QUEUED
+    # ========================================================
+
+    if s == "QUEUED":
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="QUEUED",
+            public_url=None,
+            last_error=None,
+            last_logs=stext[-30000:],
+        )
+
+        return get_deployment(user.id)
+
+    # ========================================================
+    # ERROR
+    # ========================================================
+
+    if s == "ERROR":
+        upsert_deployment(
+            user.id,
+            kernel_id=dep.kernel_id,
+            kernel_slug=dep.kernel_slug,
+            status="ERROR",
+            public_url=None,
+            last_error=stext[-12000:],
+            last_logs=stext[-30000:],
+        )
+
+        return get_deployment(user.id)
+
+    # ========================================================
+    # FINAL FAIL-CLOSED FALLBACK
     # ========================================================
 
     upsert_deployment(
         user.id,
         kernel_id=dep.kernel_id,
         kernel_slug=dep.kernel_slug,
-        status=final,
-        public_url=url,
-        last_error=(
-            stext
-            if final == "ERROR"
-            else None
-        ),
-        last_logs=combined[-30000:],
+        status="IDLE",
+        public_url=None,
+        last_error=None,
+        last_logs=None,
     )
 
-    return get_deployment(
-        user.id
-    )
+    return get_deployment(user.id)
 
 
 # ============================================================
@@ -1831,10 +1911,10 @@ def admin_login():
                 "f5tts_admin",
                 cookie_value,
                 expires_at=(
-                    time.time()
-                    + SESSION_DAYS
-                    * 86400
+                    datetime.now(timezone.utc)
+                    + timedelta(days=SESSION_DAYS)
                 ),
+                path="/",
             )
 
     except Exception:
